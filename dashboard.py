@@ -1,0 +1,1048 @@
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from pathlib import Path
+import numpy as np
+import base64
+
+st.set_page_config(page_title="Tonga National Fuel Supply & Consumption Dashboard", layout="wide")
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def resolve_existing_path(candidates):
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists():
+            return path
+    return Path(candidates[0])
+
+
+DEFAULT_FILE = resolve_existing_path(
+    [
+        BASE_DIR / "Oil_Data_Consolidated.xlsx",
+        Path(r"c:\Users\halea\Nextcloud\Documents\Petroleum\Oil_Data_Consolidated.xlsx"),
+    ]
+)
+BACKGROUND_FILE = resolve_existing_path(
+    [
+        BASE_DIR / "background.jpg",
+        BASE_DIR.parent / "doe-website" / "background.jpg",
+        Path(r"c:\Users\halea\Nextcloud\Documents\doe-website\background.jpg"),
+    ]
+)
+LOGO_FILE = resolve_existing_path(
+    [
+        BASE_DIR / "tonga-energy-logo.jpg",
+        BASE_DIR.parent / "doe-website" / "public" / "assets" / "tonga-energy-logo.jpg",
+        Path(r"c:\Users\halea\Nextcloud\Documents\doe-website\public\assets\tonga-energy-logo.jpg"),
+    ]
+)
+CHART_COLORS = ["#7DD3FC", "#60A5FA", "#A78BFA", "#F59E0B", "#34D399"]
+
+
+@st.cache_data
+def load_data(file_obj, file_mtime=None):
+    xls = pd.ExcelFile(file_obj)
+    actual = pd.read_excel(file_obj, sheet_name="Actual")
+    resupply = pd.read_excel(file_obj, sheet_name="Resupply")
+    terminal = pd.read_excel(file_obj, sheet_name="Terminal")
+
+    # Normalize dtypes for reliable filtering and charting.
+    if "Date" in actual.columns:
+        actual["Date"] = pd.to_datetime(actual["Date"], errors="coerce")
+    if "Date" in resupply.columns:
+        resupply["Date"] = pd.to_datetime(resupply["Date"], errors="coerce")
+
+    for col in ["Closing Stock", "Offtake", "Tonga Power Offtake"]:
+        if col in actual.columns:
+            actual[col] = pd.to_numeric(actual[col], errors="coerce")
+
+    if "Quantity" in resupply.columns:
+        resupply["Quantity"] = pd.to_numeric(resupply["Quantity"], errors="coerce")
+
+    if "Quantity" in terminal.columns:
+        terminal["Quantity"] = pd.to_numeric(terminal["Quantity"], errors="coerce")
+
+    return xls.sheet_names, actual, resupply, terminal
+
+
+def calculate_kpis(actual_df, resupply_df):
+    """Calculate KPI metrics."""
+    # Total Stock: sum of all latest closing stock values
+    latest_actual = actual_df.dropna(subset=["Date", "Closing Stock"])
+    if not latest_actual.empty:
+        latest_actual = latest_actual.sort_values("Date")
+        latest_actual = latest_actual.drop_duplicates(subset=["Company", "Location", "Fuel Type"], keep="last")
+        total_stock = latest_actual["Closing Stock"].sum()
+    else:
+        total_stock = 0
+
+    # Total Offtake excludes Tonga Power so the two KPI cards do not double count.
+    offtake_data = actual_df.copy()
+    offtake_data["Offtake"] = pd.to_numeric(offtake_data.get("Offtake"), errors="coerce").fillna(0)
+    offtake_data["Tonga Power Offtake"] = pd.to_numeric(
+        offtake_data.get("Tonga Power Offtake"), errors="coerce"
+    ).fillna(0)
+    total_offtake = (offtake_data["Offtake"] - offtake_data["Tonga Power Offtake"]).clip(lower=0).sum()
+    total_consumption = offtake_data["Offtake"].sum()
+
+    # Upcoming Supply: sum of all resupply quantities
+    upcoming_data = resupply_df.dropna(subset=["Quantity"])
+    upcoming_supply = upcoming_data["Quantity"].sum()
+
+    return total_stock, total_offtake, upcoming_supply, total_consumption
+
+
+def calculate_stock_by_fuel(actual_df):
+    """Calculate latest stock by fuel type."""
+    latest_actual = actual_df.dropna(subset=["Date", "Closing Stock"])
+    if not latest_actual.empty:
+        latest_actual = latest_actual.sort_values("Date")
+        latest_actual = latest_actual.drop_duplicates(subset=["Company", "Location", "Fuel Type"], keep="last")
+        stock_by_fuel = latest_actual.groupby("Fuel Type")["Closing Stock"].sum()
+        return stock_by_fuel
+    return pd.Series()
+
+
+def calculate_days_of_cover(total_stock, daily_offtake):
+    """Calculate days of cover."""
+    if daily_offtake > 0:
+        return total_stock / daily_offtake
+    return 0
+
+
+def calculate_cover_status(days_of_cover):
+    """Classify stock risk status based on days of cover."""
+    if days_of_cover >= 45:
+        return "Safe"
+    if days_of_cover >= 30:
+        return "Watch"
+    return "Critical"
+
+
+def to_csv(df):
+    """Convert DataFrame to CSV bytes."""
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def checkbox_slicer(container, title, options, key_prefix):
+    """Render a checkbox-style slicer and return selected options."""
+    container.markdown(f'<div class="filter-title-chip">{title}</div>', unsafe_allow_html=True)
+    select_all = container.checkbox("Select all", value=True, key=f"{key_prefix}_all")
+    selected = []
+
+    for idx, option in enumerate(options):
+        checked = container.checkbox(
+            str(option),
+            value=select_all,
+            key=f"{key_prefix}_{idx}",
+        )
+        if checked:
+            selected.append(option)
+
+    return selected
+
+
+def format_compact(value):
+    """Format numbers using compact K/M suffixes for KPI cards."""
+    if pd.isna(value):
+        return "0"
+    abs_value = abs(float(value))
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.0f}K"
+    return f"{value:.0f}"
+
+
+def fuel_icon(fuel_name):
+    """Return a simple icon for fuel KPI labels."""
+    fuel_text = str(fuel_name).strip().lower()
+    if "diesel" in fuel_text:
+        return "🛢️"
+    if "petrol" in fuel_text or "gasoline" in fuel_text:
+        return "⛽"
+    if "kerosene" in fuel_text or "jet" in fuel_text:
+        return "✈️"
+    return "🔹"
+
+
+def render_kpi_tile(container, icon, label, value, accent):
+    """Render a compact KPI tile with a colored accent for better scanability."""
+    container.markdown(
+        f"""
+        <div class="kpi-tile" style="border-left: 3px solid {accent};">
+            <div class="kpi-label">{icon} {label}</div>
+            <div class="kpi-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpi_category(container, title, items, class_name=""):
+    """Render a compact category card with tightly controlled KPI spacing."""
+    items_html = "".join(
+        [
+            f'<div class="kpi-mini" style="border-left: 3px solid {accent};">'
+            f'<div class="kpi-mini-line">'
+            f'<div class="kpi-mini-label">{icon} {label}</div>'
+            f'<div class="kpi-mini-value">{value}</div>'
+            f'</div>'
+            f'</div>'
+            for icon, label, value, accent in items
+        ]
+    )
+    container.markdown(
+        (
+            f'<div class="kpi-category-card {class_name}">'
+            f'<div class="kpi-category-title">{title}</div>'
+            f'<div class="kpi-mini-row">{items_html}</div>'
+            f'</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpi_group(container, title, items):
+    """Render one grouped KPI block with a single border around title and cards."""
+    cards_html = "".join(
+        [
+            (
+                f'<div class="kpi-group-card" style="border-left: 3px solid {accent};">'
+                f'<div class="kpi-group-card-label">{icon} {label}</div>'
+                f'<div class="kpi-group-card-value">{value}</div>'
+                f'</div>'
+            )
+            for icon, label, value, accent in items
+        ]
+    )
+    container.markdown(
+        (
+            '<div class="kpi-group-frame">'
+            f'<div class="kpi-group-title">{title}</div>'
+            f'<div class="kpi-group-row">{cards_html}</div>'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_chart_title(container, title):
+    """Render a highlighted chart title bar inside chart containers."""
+    container.markdown(f'<div class="chart-title-bar">{title}</div>', unsafe_allow_html=True)
+
+def set_app_background(image_path):
+    """Set dashboard background image from a local file."""
+    if not image_path.exists():
+        return
+
+    encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-image: linear-gradient(rgba(8, 13, 20, 0.68), rgba(8, 13, 20, 0.68)), url("data:image/jpeg;base64,{encoded}");
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+        }}
+
+        /* Dark theme: even stronger overlay for max contrast */
+        @media (prefers-color-scheme: dark) {{
+            .stApp {{
+                background-image: linear-gradient(rgba(5, 9, 14, 0.78), rgba(5, 9, 14, 0.78)), url("data:image/jpeg;base64,{encoded}");
+            }}
+        }}
+
+        [data-testid="stHeader"] {{
+            background: rgba(0, 0, 0, 0);
+        }}
+        [data-testid="stToolbar"] {{
+            right: 0.5rem;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def apply_chart_theme(fig, height=400, hovermode=None, x_title=None, y_title=None, date_x=False):
+    """Apply a consistent high-contrast chart style and readable formatting."""
+    fig.update_layout(
+        height=height,
+        colorway=CHART_COLORS,
+        paper_bgcolor="rgba(0, 0, 0, 0)",
+        plot_bgcolor="rgba(12, 18, 26, 0.86)",
+        font=dict(color="#E6EDF5", size=14),
+        title=dict(x=0.02, xanchor="left", font=dict(size=18, color="#F8FBFF")),
+        margin=dict(l=16, r=16, t=62, b=68),
+        bargap=0.18,
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.16,
+            xanchor="left",
+            x=0,
+            font=dict(color="#E6EDF5", size=13),
+        ),
+    )
+    if hovermode:
+        fig.update_layout(hovermode=hovermode)
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(173, 191, 210, 0.22)",
+        zeroline=False,
+        linecolor="rgba(173, 191, 210, 0.35)",
+        tickfont=dict(color="#E6EDF5", size=13),
+        title_font=dict(color="#E6EDF5", size=14),
+        title_text=x_title,
+        tickformat="%d %b" if date_x else None,
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(173, 191, 210, 0.22)",
+        zeroline=False,
+        linecolor="rgba(173, 191, 210, 0.35)",
+        tickfont=dict(color="#E6EDF5", size=13),
+        title_font=dict(color="#E6EDF5", size=14),
+        title_text=y_title,
+        tickformat=",.0f",
+        separatethousands=True,
+    )
+    fig.update_traces(hoverlabel=dict(font=dict(color="#0B1220")))
+    return fig
+
+
+set_app_background(BACKGROUND_FILE)
+
+logo_html = ""
+if LOGO_FILE.exists():
+    logo_b64 = base64.b64encode(LOGO_FILE.read_bytes()).decode("utf-8")
+    logo_html = (
+        f'<img src="data:image/jpeg;base64,{logo_b64}" '
+        'style="height:78px; width:auto; object-fit:contain; border-radius:8px; margin-right:0.75rem; border:1px solid rgba(173, 191, 210, 0.45);" '
+        'alt="Organization Logo" />'
+    )
+
+st.markdown(
+    f"""
+    <div style="
+        padding: 0.14rem 0.62rem;
+        margin: 0.01rem 0 0.24rem 0;
+        border: 1.6px solid rgba(125, 211, 252, 0.72);
+        border-radius: 12px;
+        background: linear-gradient(180deg, rgba(30, 64, 175, 0.12), rgba(14, 22, 32, 0.66));
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.2), 0 0 10px rgba(56, 189, 248, 0.16);
+        backdrop-filter: blur(2px);
+    ">
+        <div style="display:flex; align-items:center; gap:0.25rem;">
+            {logo_html}
+            <div>
+                <h1 style="margin: 0; font-size: 2.2rem; line-height: 1.2; font-weight: 700; letter-spacing: 0.2px;">Tonga National Fuel Supply and Consumption Dashboard</h1>
+                <p style="margin: 0.18rem 0 0 0; opacity: 0.88; font-size: 1.08rem; line-height: 1.3;">
+                    Staged Energy and Fuel Supply Plan Monitoring
+                </p>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 0.5rem;
+        padding-bottom: 0.55rem;
+        max-width: 1320px;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
+    div[data-testid="stHorizontalBlock"] {
+        gap: 0.5rem;
+    }
+
+    .stApp {
+        color: #F2F6FA;
+        font-size: 16px;
+    }
+
+    .stMarkdown p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] div {
+        font-size: 0.98rem;
+    }
+
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3 {
+        font-size: 1.45rem !important;
+        line-height: 1.25;
+        font-weight: 700;
+        margin-top: 0.08rem;
+        margin-bottom: 0.35rem;
+        border: 1.8px solid rgba(125, 211, 252, 0.72);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(30, 64, 175, 0.14), rgba(14, 22, 32, 0.66));
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.2), 0 0 10px rgba(56, 189, 248, 0.16);
+        padding: 0.26rem 0.62rem;
+        color: #F4FAFF;
+    }
+
+    [data-testid="stMarkdownContainer"] h3 {
+        font-size: 1.18rem !important;
+        line-height: 1.3;
+    }
+
+    div[data-testid="stMetric"] {
+        padding: 0.1rem 0.2rem;
+        color: #F2F6FA;
+    }
+
+    div[data-testid="stMetricLabel"],
+    div[data-testid="stMetricValue"] {
+        color: #F2F6FA;
+    }
+
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.98rem;
+        line-height: 1.2;
+    }
+
+    div[data-testid="stMetricValue"] {
+        font-size: 1.34rem;
+        line-height: 1.15;
+        font-weight: 500 !important;
+    }
+
+    div[data-testid="stCaptionContainer"] {
+        font-size: 1.02rem;
+        letter-spacing: 0.2px;
+    }
+
+    .kpi-tile {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(173, 191, 210, 0.18);
+        border-radius: 8px;
+        padding: 0.45rem 0.5rem;
+        min-height: 66px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.45rem;
+        margin-bottom: 0.14rem;
+    }
+
+    .kpi-group-title {
+        border: none;
+        border-radius: 8px;
+        background: linear-gradient(90deg, rgba(30, 64, 175, 0.42), rgba(14, 116, 144, 0.36));
+        padding: 0.24rem 0.42rem;
+        font-size: 0.9rem;
+        font-weight: 650;
+        line-height: 1.2;
+        margin-bottom: 0.35rem;
+        text-align: center;
+        color: #F8FCFF;
+        letter-spacing: 0.2px;
+        box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.22);
+    }
+
+    .kpi-group-frame {
+        border: 1.6px solid rgba(125, 211, 252, 0.72);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(14, 116, 144, 0.1), rgba(14, 22, 32, 0.68));
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.2), 0 0 10px rgba(56, 189, 248, 0.16);
+        padding: 0.46rem 0.5rem 0.62rem 0.5rem;
+    }
+
+    .kpi-group-row {
+        display: flex;
+        gap: 0.35rem;
+        align-items: stretch;
+    }
+
+    .kpi-group-card {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(173, 191, 210, 0.18);
+        border-radius: 8px;
+        padding: 0.45rem 0.5rem;
+        min-height: 66px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.45rem;
+    }
+
+    .kpi-group-card-label {
+        font-size: 0.9rem;
+        line-height: 1.12;
+        opacity: 0.96;
+        font-weight: 460 !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .kpi-group-card-value {
+        font-size: 1.28rem;
+        line-height: 1.05;
+        font-weight: 520 !important;
+        color: #F8FBFF;
+        margin-left: auto;
+        white-space: nowrap;
+    }
+
+    .chart-title-bar {
+        border: 1px solid rgba(125, 211, 252, 0.58);
+        border-radius: 10px;
+        background: linear-gradient(90deg, rgba(30, 64, 175, 0.22), rgba(14, 116, 144, 0.18));
+        color: #F4FAFF;
+        font-size: 1rem;
+        font-weight: 650;
+        line-height: 1.2;
+        padding: 0.28rem 0.62rem;
+        text-align: center;
+        margin: 0.02rem 0 0.38rem 0;
+        box-shadow: inset 0 0 0 1px rgba(186, 230, 253, 0.1);
+    }
+
+    .st-key-filter_company_group,
+    .st-key-filter_location_group,
+    .st-key-filter_fuel_group,
+    .st-key-filter_month_group,
+    .st-key-filter_company_group div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-filter_location_group div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-filter_fuel_group div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-filter_month_group div[data-testid="stVerticalBlockBorderWrapper"] {
+        border: 1.8px solid rgba(125, 211, 252, 0.72) !important;
+        border-radius: 14px !important;
+        background: linear-gradient(180deg, rgba(30, 64, 175, 0.12), rgba(14, 22, 32, 0.66)) !important;
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.2), 0 0 10px rgba(56, 189, 248, 0.16);
+        padding: 0.3rem 0.45rem 0.35rem 0.45rem !important;
+        margin-bottom: 0.35rem;
+    }
+
+    .st-key-chart_stock,
+    .st-key-chart_offtake,
+    .st-key-chart_location,
+    .st-key-chart_resupply,
+    .st-key-chart_terminal,
+    .st-key-chart_stock div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-chart_offtake div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-chart_location div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-chart_resupply div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-chart_terminal div[data-testid="stVerticalBlockBorderWrapper"] {
+        border: 1.8px solid rgba(125, 211, 252, 0.72) !important;
+        border-radius: 14px !important;
+        background: linear-gradient(180deg, rgba(30, 64, 175, 0.12), rgba(14, 22, 32, 0.66)) !important;
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.2), 0 0 10px rgba(56, 189, 248, 0.16);
+    }
+
+    .filter-title-chip {
+        border: 1px solid rgba(125, 211, 252, 0.62);
+        border-radius: 8px;
+        background: linear-gradient(90deg, rgba(30, 64, 175, 0.2), rgba(14, 116, 144, 0.16));
+        color: #F4FAFF;
+        font-size: 0.9rem;
+        font-weight: 650;
+        line-height: 1.2;
+        padding: 0.2rem 0.42rem;
+        margin: 0.06rem 0 0.3rem 0;
+        box-shadow: inset 0 0 0 1px rgba(186, 230, 253, 0.08);
+        text-align: center;
+    }
+
+    /* Highlight the single group-defining border (subtitle + cards together). */
+    .st-key-kpi_supply_group,
+    .st-key-kpi_offtake_group,
+    .st-key-kpi_fuel_group,
+    .st-key-kpi_coverage_group {
+        border: 2px solid rgba(125, 211, 252, 0.7) !important;
+        border-radius: 14px !important;
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.26), 0 0 16px rgba(56, 189, 248, 0.22);
+        background: linear-gradient(180deg, rgba(14, 116, 144, 0.16), rgba(14, 22, 32, 0.68)) !important;
+        padding: 0.34rem 0.34rem 0.56rem 0.34rem !important;
+        overflow: hidden;
+    }
+
+    .st-key-kpi_supply_group div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-kpi_offtake_group div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-kpi_fuel_group div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-kpi_coverage_group div[data-testid="stVerticalBlockBorderWrapper"] {
+        border: none !important;
+        box-shadow: none !important;
+        background: transparent !important;
+        padding: 0.48rem 0.48rem 0.98rem 0.48rem !important;
+    }
+
+    .kpi-label {
+        font-size: 0.9rem;
+        line-height: 1.12;
+        opacity: 0.96;
+        font-weight: 460 !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .kpi-value {
+        font-size: 1.28rem;
+        line-height: 1.05;
+        font-weight: 520 !important;
+        color: #F8FBFF;
+        margin-left: auto;
+        white-space: nowrap;
+    }
+
+    .kpi-category-card {
+        border: 1px solid rgba(173, 191, 210, 0.38);
+        border-radius: 12px;
+        background: rgba(14, 22, 32, 0.78);
+        backdrop-filter: blur(3px);
+        padding: 0.16rem 0.28rem 0.2rem 0.28rem;
+    }
+
+    .kpi-category-card.compact-wide {
+        max-width: 860px;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
+    .kpi-category-card.compact-wide .kpi-mini-row {
+        justify-content: center;
+    }
+
+    .kpi-category-card.compact-wide .kpi-mini {
+        flex: 0 1 220px;
+    }
+
+    .kpi-category-title {
+        font-size: 0.98rem;
+        font-weight: 500 !important;
+        margin: 0 0 0.08rem 0;
+        line-height: 1.05;
+    }
+
+    .kpi-mini-row {
+        display: flex;
+        gap: 0.24rem;
+        align-items: stretch;
+    }
+
+    .kpi-mini {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 8px;
+        padding: 0.62rem 0.38rem;
+        min-height: 100px;
+        display: flex;
+        align-items: center;
+    }
+
+    .kpi-mini-line {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+    }
+
+    .kpi-mini-label {
+        font-size: 0.9rem;
+        line-height: 1.1;
+        opacity: 0.96;
+        font-weight: 460 !important;
+        white-space: nowrap;
+    }
+
+    .kpi-mini-value {
+        margin-top: 0;
+        font-size: 1.12rem;
+        line-height: 1.05;
+        font-weight: 500 !important;
+        color: #F8FBFF;
+        white-space: nowrap;
+    }
+
+    /* Strong override for custom KPI blocks */
+    .kpi-category-card .kpi-mini .kpi-mini-value,
+    .kpi-category-card .kpi-mini .kpi-mini-label,
+    .kpi-category-card .kpi-category-title {
+        font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    }
+
+    /* Compact only the top KPI category boxes */
+    .st-key-kpi_supply,
+    .st-key-kpi_offtake,
+    .st-key-kpi_coverage {
+        padding-top: 0;
+        padding-bottom: 0;
+    }
+
+    .st-key-kpi_supply div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-kpi_offtake div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-kpi_coverage div[data-testid="stVerticalBlockBorderWrapper"] {
+        padding-top: 0.08rem;
+        padding-bottom: 0.2rem;
+    }
+
+    .st-key-kpi_supply div[data-testid="stMetric"],
+    .st-key-kpi_offtake div[data-testid="stMetric"],
+    .st-key-kpi_coverage div[data-testid="stMetric"] {
+        padding: 0 0.06rem;
+    }
+
+    .st-key-kpi_supply div[data-testid="stMetricValue"],
+    .st-key-kpi_offtake div[data-testid="stMetricValue"],
+    .st-key-kpi_coverage div[data-testid="stMetricValue"] {
+        font-size: 1.12rem;
+    }
+
+    .st-key-kpi_supply div[data-testid="stMetricLabel"],
+    .st-key-kpi_offtake div[data-testid="stMetricLabel"],
+    .st-key-kpi_coverage div[data-testid="stMetricLabel"] {
+        font-size: 1rem;
+    }
+
+    .st-key-kpi_supply div[data-testid="stCaptionContainer"],
+    .st-key-kpi_offtake div[data-testid="stCaptionContainer"],
+    .st-key-kpi_coverage div[data-testid="stCaptionContainer"] {
+        margin-bottom: 0;
+        margin-top: 0;
+        line-height: 1.05;
+    }
+
+    .st-key-kpi_supply .kpi-tile,
+    .st-key-kpi_offtake .kpi-tile,
+    .st-key-kpi_coverage .kpi-tile {
+        margin-top: -0.05rem;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: rgba(14, 22, 32, 0.78);
+        border: 1px solid rgba(173, 191, 210, 0.38);
+        border-radius: 12px;
+        backdrop-filter: blur(3px);
+        padding-top: 0.2rem;
+        padding-bottom: 0.2rem;
+    }
+
+    div[data-testid="stCaptionContainer"] {
+        margin-bottom: 0.1rem;
+    }
+
+    div[data-testid="stTabs"] {
+        margin-top: 0;
+    }
+
+    hr {
+        margin-top: 0.3rem !important;
+        margin-bottom: 0.3rem !important;
+    }
+
+    [data-testid="stSidebar"] {
+        background: rgba(9, 15, 23, 0.88);
+        border-right: 1px solid rgba(173, 191, 210, 0.32);
+    }
+
+    [data-testid="stSidebar"] * {
+        color: #F2F6FA !important;
+    }
+
+    @media (max-width: 900px) {
+        .stApp {
+            font-size: 15px;
+        }
+        [data-testid="stMarkdownContainer"] h2 {
+            font-size: 1.28rem !important;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.2rem;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+file_to_use = DEFAULT_FILE
+
+if not DEFAULT_FILE.exists():
+    st.error(f"Default file not found at {DEFAULT_FILE}")
+    st.stop()
+
+try:
+    file_mtime = file_to_use.stat().st_mtime
+    sheets, actual_df, resupply_df, terminal_df = load_data(file_to_use, file_mtime=file_mtime)
+except Exception as exc:
+    st.error(f"Failed to load workbook: {exc}")
+    st.stop()
+
+# Sidebar filters
+st.sidebar.title("🎛️ Filters")
+
+companies = sorted([x for x in actual_df["Company"].dropna().unique()])
+locations = sorted([x for x in actual_df["Location"].dropna().unique()])
+fuels = sorted([x for x in actual_df["Fuel Type"].dropna().unique()])
+months = (
+    sorted(actual_df["Date"].dropna().dt.to_period("M").astype(str).unique())
+    if "Date" in actual_df.columns
+    else []
+)
+
+company_filter_box = st.sidebar.container(border=True, key="filter_company_group")
+location_filter_box = st.sidebar.container(border=True, key="filter_location_group")
+fuel_filter_box = st.sidebar.container(border=True, key="filter_fuel_group")
+month_filter_box = st.sidebar.container(border=True, key="filter_month_group")
+
+company_sel = checkbox_slicer(company_filter_box, "Company", companies, "company")
+location_sel = checkbox_slicer(location_filter_box, "Location", locations, "location")
+fuel_sel = checkbox_slicer(fuel_filter_box, "Fuel Type", fuels, "fuel")
+month_sel = checkbox_slicer(month_filter_box, "Month", months, "month")
+
+actual_df_for_filter = actual_df.copy()
+if "Date" in actual_df_for_filter.columns:
+    actual_df_for_filter["Month"] = actual_df_for_filter["Date"].dt.to_period("M").astype(str)
+
+# Apply filters
+filtered_actual = actual_df_for_filter[
+    actual_df_for_filter["Company"].isin(company_sel)
+    & actual_df_for_filter["Location"].isin(location_sel)
+    & actual_df_for_filter["Fuel Type"].isin(fuel_sel)
+    & actual_df_for_filter["Month"].isin(month_sel)
+].copy()
+
+# Display KPIs
+st.subheader("Key Performance Indicators")
+total_stock, non_power_offtake, upcoming_supply, total_consumption = calculate_kpis(filtered_actual, resupply_df)
+tonga_power_offtake = (
+    filtered_actual["Tonga Power Offtake"].dropna().sum()
+    if "Tonga Power Offtake" in filtered_actual.columns
+    else 0
+)
+avg_daily_offtake = total_consumption / len(filtered_actual["Date"].unique()) if len(filtered_actual["Date"].unique()) > 0 else 0
+days_of_cover = calculate_days_of_cover(total_stock, avg_daily_offtake)
+cover_status = calculate_cover_status(days_of_cover)
+
+status_icon = "🟢" if cover_status == "Safe" else "🟡" if cover_status == "Watch" else "🔴"
+status_accent = "#22C55E" if cover_status == "Safe" else "#F59E0B" if cover_status == "Watch" else "#EF4444"
+
+supply_items = [
+    ("🔶", "Total Fuel", f"{format_compact(total_stock)}", "#60A5FA"),
+    ("📈", "Upcoming Supply", f"{format_compact(upcoming_supply)}", "#34D399"),
+]
+offtake_items = [
+    ("📊", "Total Offtake", f"{format_compact(total_consumption)}", "#7DD3FC"),
+    ("⚡", "Tonga Power", f"{format_compact(tonga_power_offtake)}", "#F59E0B"),
+    ("📉", "Non-Power", f"{format_compact(non_power_offtake)}", "#A78BFA"),
+]
+coverage_items = [
+    ("⏱️", "Days", f"{days_of_cover:.2f}", "#38BDF8"),
+    (status_icon, "Status", cover_status, status_accent),
+]
+
+# Row 1: Supply + Offtake (with group titles)
+top_supply_col, top_offtake_col = st.columns([2, 3], gap="small")
+render_kpi_group(top_supply_col, "Supply", supply_items)
+render_kpi_group(top_offtake_col, "Offtake Breakdown", offtake_items)
+
+st.markdown("<div style='height: 0.2rem;'></div>", unsafe_allow_html=True)
+
+# Row 2: Stock by Fuel (left) + Coverage (right)
+stock_by_fuel = calculate_stock_by_fuel(filtered_actual)
+bottom_left, bottom_right = st.columns([3, 2], gap="small")
+
+with bottom_left:
+    if not stock_by_fuel.empty:
+        fuel_items = []
+        for i, (fuel, stock) in enumerate(stock_by_fuel.items()):
+            fuel_items.append((fuel_icon(fuel), str(fuel), f"{format_compact(stock)}", CHART_COLORS[i % len(CHART_COLORS)]))
+        render_kpi_group(bottom_left, "Stock by Fuel Type", fuel_items)
+    else:
+        st.caption("No stock by fuel data")
+
+with bottom_right:
+    render_kpi_group(bottom_right, "Coverage", coverage_items)
+
+st.divider()
+
+# Main visualization area
+tab1, tab2 = st.tabs(["📊 Dashboard", "📦 Terminal Data"])
+
+with tab1:
+    # Row 1: Key Visualizations
+    col1, col2 = st.columns(2)
+    
+    # Chart 1: Stock Over Time by Fuel Type
+    with col1:
+        stock_data = filtered_actual.dropna(subset=["Date", "Closing Stock"])
+        if not stock_data.empty:
+            stock_by_date_fuel = stock_data.groupby(["Date", "Fuel Type"])["Closing Stock"].mean().reset_index()
+            fig_stock = px.line(
+                stock_by_date_fuel,
+                x="Date",
+                y="Closing Stock",
+                color="Fuel Type",
+                title="Stock Level Over Time by Fuel Type",
+                markers=True,
+                color_discrete_sequence=CHART_COLORS,
+            )
+            apply_chart_theme(
+                fig_stock,
+                height=400,
+                hovermode="x unified",
+                x_title="Date",
+                y_title="Closing Stock (L)",
+                date_x=True,
+            )
+            fig_stock.update_layout(title=None)
+            with st.container(border=True, key="chart_stock"):
+                render_chart_title(st, "Stock Level Over Time by Fuel Type")
+                st.plotly_chart(fig_stock, width='stretch')
+        else:
+            st.info("No stock data available")
+    
+    # Chart 2: Fuel Offtake Over Time
+    with col2:
+        offtake_data = filtered_actual.dropna(subset=["Date", "Offtake"])
+        if not offtake_data.empty:
+            offtake_by_date_fuel = offtake_data.groupby(["Date", "Fuel Type"])["Offtake"].sum().reset_index()
+            fig_offtake = px.bar(
+                offtake_by_date_fuel,
+                x="Date",
+                y="Offtake",
+                color="Fuel Type",
+                title="Daily Offtake (Take-off) by Fuel Type",
+                barmode="stack",
+                color_discrete_sequence=CHART_COLORS,
+            )
+
+            # Add Tonga Power as an explicit overlay series for direct comparison.
+            if "Tonga Power Offtake" in offtake_data.columns:
+                tonga_power_by_date = (
+                    offtake_data.groupby("Date", as_index=False)["Tonga Power Offtake"]
+                    .sum(min_count=1)
+                    .fillna(0)
+                )
+                if not tonga_power_by_date.empty and (tonga_power_by_date["Tonga Power Offtake"] > 0).any():
+                    fig_offtake.add_trace(
+                        go.Scatter(
+                            x=tonga_power_by_date["Date"],
+                            y=tonga_power_by_date["Tonga Power Offtake"],
+                            mode="lines+markers",
+                            name="Tonga Power Offtake",
+                            line=dict(color="#FDE047", width=2.5),
+                            marker=dict(size=6, color="#FDE047"),
+                        )
+                    )
+
+            apply_chart_theme(
+                fig_offtake,
+                height=400,
+                hovermode="x unified",
+                x_title="Date",
+                y_title="Offtake (L)",
+                date_x=True,
+            )
+            fig_offtake.update_layout(title=None)
+            with st.container(border=True, key="chart_offtake"):
+                render_chart_title(st, "Daily Offtake (Take-off) by Fuel Type")
+                st.plotly_chart(fig_offtake, width='stretch')
+        else:
+            st.info("No offtake data available")
+    
+    st.divider()
+    
+    # Row 2: Comparative Analysis
+    col3, col4 = st.columns(2)
+    
+    # Chart 3: Stock by Location
+    with col3:
+        stock_by_location = filtered_actual.dropna(subset=["Location", "Closing Stock"])
+        if not stock_by_location.empty:
+            latest_stock_loc = stock_by_location.sort_values("Date").drop_duplicates(
+                subset=["Location", "Fuel Type"], keep="last"
+            )
+            stock_loc_summary = latest_stock_loc.groupby(["Location", "Fuel Type"])["Closing Stock"].sum().reset_index()
+            fig_loc = px.bar(
+                stock_loc_summary,
+                x="Location",
+                y="Closing Stock",
+                color="Fuel Type",
+                title="Current Stock by Location",
+                barmode="group",
+                color_discrete_sequence=CHART_COLORS,
+            )
+            apply_chart_theme(fig_loc, height=400, x_title="Location", y_title="Closing Stock (L)")
+            fig_loc.update_layout(title=None)
+            with st.container(border=True, key="chart_location"):
+                render_chart_title(st, "Current Stock by Location")
+                st.plotly_chart(fig_loc, width='stretch')
+        else:
+            st.info("No location data available")
+    
+    # Chart 4: Resupply Schedule
+    with col4:
+        resupply_data = resupply_df.dropna(subset=["Date", "Quantity"])
+        if not resupply_data.empty:
+            resupply_summary = resupply_data.groupby(["Date", "Fuel Type"])["Quantity"].sum().reset_index()
+            fig_resupply = px.bar(
+                resupply_summary,
+                x="Date",
+                y="Quantity",
+                color="Fuel Type",
+                title="Scheduled Resupply by Date",
+                barmode="stack",
+                color_discrete_sequence=CHART_COLORS,
+            )
+            apply_chart_theme(fig_resupply, height=400, x_title="Resupply Date", y_title="Quantity (L)", date_x=True)
+            fig_resupply.update_layout(title=None)
+            with st.container(border=True, key="chart_resupply"):
+                render_chart_title(st, "Scheduled Resupply by Date")
+                st.plotly_chart(fig_resupply, width='stretch')
+        else:
+            st.info("No resupply data scheduled")
+
+with tab2:
+    st.subheader("Terminal Capacities")
+    
+    # Terminal data filters
+    t_col1, t_col2 = st.columns(2)
+    t_locations = sorted([x for x in terminal_df["Location"].dropna().unique()])
+    t_info = sorted([x for x in terminal_df["Terminal Info"].dropna().unique()])
+    
+    t_loc_sel = checkbox_slicer(t_col1, "Terminal Location", t_locations, "t_loc")
+    t_info_sel = checkbox_slicer(t_col2, "Terminal Type", t_info, "t_info")
+    
+    filtered_terminal = terminal_df[
+        terminal_df["Location"].isin(t_loc_sel)
+        & terminal_df["Terminal Info"].isin(t_info_sel)
+    ].copy()
+    
+    # Terminal visualization
+    valid_terminal = filtered_terminal.dropna(subset=["Quantity"])
+    if not valid_terminal.empty:
+        fig_terminal = px.bar(
+            valid_terminal,
+            x="Terminal Info",
+            y="Quantity",
+            color="Fuel Type",
+            facet_col="Location",
+            title="Terminal Capacities by Location and Type",
+            barmode="group",
+            color_discrete_sequence=CHART_COLORS,
+        )
+        apply_chart_theme(fig_terminal, height=450, x_title="Terminal Category", y_title="Capacity (L)")
+        fig_terminal.update_layout(title=None)
+        fig_terminal.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+        with st.container(border=True, key="chart_terminal"):
+            render_chart_title(st, "Terminal Capacities by Location and Type")
+            st.plotly_chart(fig_terminal, width='stretch')
+    else:
+        st.info("No terminal data available")
