@@ -999,7 +999,7 @@ with tab1:
                 y_title="Closing Stock (L)",
                 date_x=True,
             )
-            fig_stock.update_layout(title=None)
+            fig_stock.update_layout(title_text="")
             with st.container(border=True, key="chart_stock"):
                 render_chart_title(st, "Stock Level Over Time by Fuel Type")
                 st.plotly_chart(fig_stock, width='stretch')
@@ -1048,7 +1048,7 @@ with tab1:
                 y_title="Offtake (L)",
                 date_x=True,
             )
-            fig_offtake.update_layout(title=None)
+            fig_offtake.update_layout(title_text="")
             with st.container(border=True, key="chart_offtake"):
                 render_chart_title(st, "Daily Offtake (Take-off) by Fuel Type")
                 st.plotly_chart(fig_offtake, width='stretch')
@@ -1078,7 +1078,7 @@ with tab1:
                 color_discrete_sequence=CHART_COLORS,
             )
             apply_chart_theme(fig_loc, height=400, x_title="Location", y_title="Closing Stock (L)")
-            fig_loc.update_layout(title=None)
+            fig_loc.update_layout(title_text="")
             with st.container(border=True, key="chart_location"):
                 render_chart_title(st, "Current Stock by Location")
                 st.plotly_chart(fig_loc, width='stretch')
@@ -1100,7 +1100,7 @@ with tab1:
                 color_discrete_sequence=CHART_COLORS,
             )
             apply_chart_theme(fig_resupply, height=400, x_title="Resupply Date", y_title="Quantity (L)", date_x=True)
-            fig_resupply.update_layout(title=None)
+            fig_resupply.update_layout(title_text="")
             with st.container(border=True, key="chart_resupply"):
                 render_chart_title(st, "Scheduled Resupply by Date")
                 st.plotly_chart(fig_resupply, width='stretch')
@@ -1137,7 +1137,7 @@ with tab2:
             color_discrete_sequence=CHART_COLORS,
         )
         apply_chart_theme(fig_terminal, height=450, x_title="Terminal Category", y_title="Capacity (L)")
-        fig_terminal.update_layout(title=None)
+        fig_terminal.update_layout(title_text="")
         fig_terminal.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
         with st.container(border=True, key="chart_terminal"):
             render_chart_title(st, "Terminal Capacities by Location and Type")
