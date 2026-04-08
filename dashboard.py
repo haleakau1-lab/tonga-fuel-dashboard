@@ -131,12 +131,19 @@ def checkbox_slicer(container, title, options, key_prefix):
     """Render a checkbox-style slicer and return selected options."""
     container.markdown(f'<div class="filter-title-chip">{title}</div>', unsafe_allow_html=True)
 
+    clear_pending_key = f"{key_prefix}_clear_pending"
+
     for idx, _ in enumerate(options):
         option_key = f"{key_prefix}_{idx}"
         if option_key not in st.session_state:
             st.session_state[option_key] = True
 
-    clear_clicked = False
+    # Apply clear action before rendering checkbox widgets to avoid
+    # modifying widget-bound keys after instantiation.
+    if st.session_state.get(clear_pending_key, False):
+        for idx, _ in enumerate(options):
+            st.session_state[f"{key_prefix}_{idx}"] = False
+        st.session_state[clear_pending_key] = False
 
     selected = []
 
@@ -149,11 +156,9 @@ def checkbox_slicer(container, title, options, key_prefix):
             selected.append(option)
 
     # Bottom-right action controls for each filter group.
-    clear_clicked = container.button("Clear", key=f"{key_prefix}_clear")
-
-    if clear_clicked:
-        for idx, _ in enumerate(options):
-            st.session_state[f"{key_prefix}_{idx}"] = False
+    if container.button("Clear", key=f"{key_prefix}_clear"):
+        st.session_state[clear_pending_key] = True
+        st.rerun()
 
     return selected
 
