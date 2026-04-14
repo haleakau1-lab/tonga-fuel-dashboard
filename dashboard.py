@@ -21,9 +21,9 @@ def resolve_existing_path(candidates):
 
 DEFAULT_FILE = resolve_existing_path(
     [
-        BASE_DIR / "Oil_Data_Consolidated_updated.xlsx",
         BASE_DIR / "Oil_Data_Consolidated.xlsx",
         Path(r"c:\Users\halea\Nextcloud\Documents\Petroleum\Oil_Data_Consolidated.xlsx"),
+        BASE_DIR / "Oil_Data_Consolidated_updated.xlsx",
     ]
 )
 BACKGROUND_FILE = resolve_existing_path(
@@ -871,6 +871,9 @@ try:
 except Exception as exc:
     st.error(f"Failed to load workbook: {exc}")
     st.stop()
+
+last_sync = pd.to_datetime(file_mtime, unit="s").strftime("%d %b %Y %H:%M")
+st.caption(f"Data source: {file_to_use.name} | Last sync: {last_sync}")
 
 # Sidebar filters
 st.sidebar.title("🎛️ Filters")
