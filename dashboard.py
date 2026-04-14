@@ -21,6 +21,7 @@ def resolve_existing_path(candidates):
 
 DEFAULT_FILE = resolve_existing_path(
     [
+        BASE_DIR / "Oil_Data_Consolidated_updated.xlsx",
         BASE_DIR / "Oil_Data_Consolidated.xlsx",
         Path(r"c:\Users\halea\Nextcloud\Documents\Petroleum\Oil_Data_Consolidated.xlsx"),
     ]
@@ -130,17 +131,35 @@ def to_csv(df):
 def checkbox_slicer(container, title, options, key_prefix):
     """Render a checkbox-style slicer and return selected options."""
     container.markdown(f'<div class="filter-title-chip">{title}</div>', unsafe_allow_html=True)
-    select_all = container.checkbox("Select all", value=True, key=f"{key_prefix}_all")
+
+    clear_pending_key = f"{key_prefix}_clear_pending"
+
+    for idx, _ in enumerate(options):
+        option_key = f"{key_prefix}_{idx}"
+        if option_key not in st.session_state:
+            st.session_state[option_key] = True
+
+    # Apply clear action before rendering checkbox widgets to avoid
+    # modifying widget-bound keys after instantiation.
+    if st.session_state.get(clear_pending_key, False):
+        for idx, _ in enumerate(options):
+            st.session_state[f"{key_prefix}_{idx}"] = False
+        st.session_state[clear_pending_key] = False
+
     selected = []
 
     for idx, option in enumerate(options):
         checked = container.checkbox(
             str(option),
-            value=select_all,
             key=f"{key_prefix}_{idx}",
         )
         if checked:
             selected.append(option)
+
+    # Bottom-right action controls for each filter group.
+    if container.button("Clear", key=f"{key_prefix}_clear"):
+        st.session_state[clear_pending_key] = True
+        st.rerun()
 
     return selected
 
@@ -358,7 +377,6 @@ st.markdown(
     .block-container {
         padding-top: 0.5rem;
         padding-bottom: 0.55rem;
-        max-width: 1320px;
         margin-left: auto;
         margin-right: auto;
     }
@@ -464,15 +482,17 @@ st.markdown(
         display: flex;
         gap: 0.35rem;
         align-items: stretch;
+        flex-wrap: wrap;
     }
 
     .kpi-group-card {
-        flex: 1;
+        flex: 1 1 180px;
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid rgba(173, 191, 210, 0.18);
         border-radius: 8px;
         padding: 0.45rem 0.5rem;
         min-height: 66px;
+        min-width: 0;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -484,7 +504,7 @@ st.markdown(
         line-height: 1.12;
         opacity: 0.96;
         font-weight: 460 !important;
-        white-space: nowrap;
+        white-space: normal;
         overflow: hidden;
         text-overflow: ellipsis;
     }
@@ -556,6 +576,39 @@ st.markdown(
         margin: 0.06rem 0 0.3rem 0;
         box-shadow: inset 0 0 0 1px rgba(186, 230, 253, 0.08);
         text-align: center;
+    }
+
+    .st-key-filter_company_group div[data-testid="stButton"],
+    .st-key-filter_location_group div[data-testid="stButton"],
+    .st-key-filter_fuel_group div[data-testid="stButton"],
+    .st-key-filter_month_group div[data-testid="stButton"] {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 0.2rem;
+    }
+
+    .st-key-filter_company_group div[data-testid="stButton"] > button,
+    .st-key-filter_location_group div[data-testid="stButton"] > button,
+    .st-key-filter_fuel_group div[data-testid="stButton"] > button,
+    .st-key-filter_month_group div[data-testid="stButton"] > button {
+        font-size: 0.76rem;
+        line-height: 1.1;
+        min-height: 1.68rem;
+        min-width: 64px;
+        white-space: nowrap;
+        padding: 0.08rem 0.42rem;
+        border-radius: 7px;
+        border: 1px solid rgba(125, 211, 252, 0.78);
+        background: linear-gradient(180deg, rgba(30, 64, 175, 0.32), rgba(14, 22, 32, 0.74));
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.18), 0 0 8px rgba(56, 189, 248, 0.2);
+    }
+
+    .st-key-filter_company_group div[data-testid="stButton"] > button:hover,
+    .st-key-filter_location_group div[data-testid="stButton"] > button:hover,
+    .st-key-filter_fuel_group div[data-testid="stButton"] > button:hover,
+    .st-key-filter_month_group div[data-testid="stButton"] > button:hover {
+        border-color: rgba(125, 211, 252, 0.95);
+        box-shadow: 0 0 0 1px rgba(186, 230, 253, 0.26), 0 0 12px rgba(56, 189, 248, 0.28);
     }
 
     /* Highlight the single group-defining border (subtitle + cards together). */
@@ -765,6 +818,41 @@ st.markdown(
         div[data-testid="stMetricValue"] {
             font-size: 1.2rem;
         }
+        .kpi-group-frame {
+            padding: 0.38rem 0.4rem 0.48rem 0.4rem;
+        }
+        .kpi-group-row {
+            gap: 0.3rem;
+        }
+        .kpi-group-card {
+            flex: 1 1 100%;
+            min-height: 58px;
+            padding: 0.38rem 0.42rem;
+        }
+        .kpi-group-card-label {
+            font-size: 0.84rem;
+            line-height: 1.15;
+        }
+        .kpi-group-card-value {
+            font-size: 1.08rem;
+        }
+        .kpi-group-title {
+            margin-bottom: 0.28rem;
+            font-size: 0.86rem;
+        }
+        .st-key-filter_company_group div[data-testid="stButton"],
+        .st-key-filter_location_group div[data-testid="stButton"],
+        .st-key-filter_fuel_group div[data-testid="stButton"],
+        .st-key-filter_month_group div[data-testid="stButton"] {
+            justify-content: stretch;
+        }
+        .st-key-filter_company_group div[data-testid="stButton"] > button,
+        .st-key-filter_location_group div[data-testid="stButton"] > button,
+        .st-key-filter_fuel_group div[data-testid="stButton"] > button,
+        .st-key-filter_month_group div[data-testid="stButton"] > button {
+            width: 100%;
+            min-width: 0;
+        }
     }
     </style>
     """,
@@ -810,6 +898,10 @@ actual_df_for_filter = actual_df.copy()
 if "Date" in actual_df_for_filter.columns:
     actual_df_for_filter["Month"] = actual_df_for_filter["Date"].dt.to_period("M").astype(str)
 
+resupply_df_for_filter = resupply_df.copy()
+if "Date" in resupply_df_for_filter.columns:
+    resupply_df_for_filter["Month"] = resupply_df_for_filter["Date"].dt.to_period("M").astype(str)
+
 # Apply filters
 filtered_actual = actual_df_for_filter[
     actual_df_for_filter["Company"].isin(company_sel)
@@ -818,9 +910,16 @@ filtered_actual = actual_df_for_filter[
     & actual_df_for_filter["Month"].isin(month_sel)
 ].copy()
 
+filtered_resupply = resupply_df_for_filter[
+    resupply_df_for_filter["Company"].isin(company_sel)
+    & resupply_df_for_filter["Location"].isin(location_sel)
+    & resupply_df_for_filter["Fuel Type"].isin(fuel_sel)
+    & resupply_df_for_filter["Month"].isin(month_sel)
+].copy()
+
 # Display KPIs
 st.subheader("Key Performance Indicators")
-total_stock, non_power_offtake, upcoming_supply, total_consumption = calculate_kpis(filtered_actual, resupply_df)
+total_stock, non_power_offtake, upcoming_supply, total_consumption = calculate_kpis(filtered_actual, filtered_resupply)
 tonga_power_offtake = (
     filtered_actual["Tonga Power Offtake"].dropna().sum()
     if "Tonga Power Offtake" in filtered_actual.columns
@@ -901,7 +1000,7 @@ with tab1:
                 y_title="Closing Stock (L)",
                 date_x=True,
             )
-            fig_stock.update_layout(title=None)
+            fig_stock.update_layout(title_text="")
             with st.container(border=True, key="chart_stock"):
                 render_chart_title(st, "Stock Level Over Time by Fuel Type")
                 st.plotly_chart(fig_stock, width='stretch')
@@ -950,7 +1049,7 @@ with tab1:
                 y_title="Offtake (L)",
                 date_x=True,
             )
-            fig_offtake.update_layout(title=None)
+            fig_offtake.update_layout(title_text="")
             with st.container(border=True, key="chart_offtake"):
                 render_chart_title(st, "Daily Offtake (Take-off) by Fuel Type")
                 st.plotly_chart(fig_offtake, width='stretch')
@@ -980,7 +1079,7 @@ with tab1:
                 color_discrete_sequence=CHART_COLORS,
             )
             apply_chart_theme(fig_loc, height=400, x_title="Location", y_title="Closing Stock (L)")
-            fig_loc.update_layout(title=None)
+            fig_loc.update_layout(title_text="")
             with st.container(border=True, key="chart_location"):
                 render_chart_title(st, "Current Stock by Location")
                 st.plotly_chart(fig_loc, width='stretch')
@@ -1002,7 +1101,7 @@ with tab1:
                 color_discrete_sequence=CHART_COLORS,
             )
             apply_chart_theme(fig_resupply, height=400, x_title="Resupply Date", y_title="Quantity (L)", date_x=True)
-            fig_resupply.update_layout(title=None)
+            fig_resupply.update_layout(title_text="")
             with st.container(border=True, key="chart_resupply"):
                 render_chart_title(st, "Scheduled Resupply by Date")
                 st.plotly_chart(fig_resupply, width='stretch')
@@ -1039,7 +1138,7 @@ with tab2:
             color_discrete_sequence=CHART_COLORS,
         )
         apply_chart_theme(fig_terminal, height=450, x_title="Terminal Category", y_title="Capacity (L)")
-        fig_terminal.update_layout(title=None)
+        fig_terminal.update_layout(title_text="")
         fig_terminal.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
         with st.container(border=True, key="chart_terminal"):
             render_chart_title(st, "Terminal Capacities by Location and Type")
