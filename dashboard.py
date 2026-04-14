@@ -21,6 +21,7 @@ def resolve_existing_path(candidates):
 
 DEFAULT_FILE = resolve_existing_path(
     [
+        BASE_DIR / "Oil_Data_Consolidated_updated.xlsx",
         BASE_DIR / "Oil_Data_Consolidated.xlsx",
         Path(r"c:\Users\halea\Nextcloud\Documents\Petroleum\Oil_Data_Consolidated.xlsx"),
     ]
