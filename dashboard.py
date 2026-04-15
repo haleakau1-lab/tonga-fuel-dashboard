@@ -41,6 +41,7 @@ LOGO_FILE = resolve_existing_path(
     ]
 )
 CHART_COLORS = ["#7DD3FC", "#60A5FA", "#A78BFA", "#F59E0B", "#34D399"]
+PRICE_FILE = BASE_DIR / "Transformed_for_Analysis.xlsx"
 
 
 @st.cache_data
@@ -67,6 +68,16 @@ def load_data(file_obj, file_mtime=None):
         terminal["Quantity"] = pd.to_numeric(terminal["Quantity"], errors="coerce")
 
     return xls.sheet_names, actual, resupply, terminal
+
+
+@st.cache_data
+def load_price_data(file_path, mtime=None):
+    fp = pd.read_excel(file_path, sheet_name="FuelPrice_Long")
+    tr = pd.read_excel(file_path, sheet_name="Tariff_Long")
+    fp["Date"] = pd.to_datetime(fp["Date"], errors="coerce")
+    fp["Price"] = pd.to_numeric(fp["Price"], errors="coerce")
+    tr["Value"] = pd.to_numeric(tr["Value"], errors="coerce")
+    return fp, tr
 
 
 def calculate_kpis(actual_df, resupply_df):
@@ -553,11 +564,17 @@ st.markdown(
     .st-key-chart_location,
     .st-key-chart_resupply,
     .st-key-chart_terminal,
+    .st-key-chart_fuel_price,
+    .st-key-chart_tariff,
+    .st-key-chart_dependency,
     .st-key-chart_stock div[data-testid="stVerticalBlockBorderWrapper"],
     .st-key-chart_offtake div[data-testid="stVerticalBlockBorderWrapper"],
     .st-key-chart_location div[data-testid="stVerticalBlockBorderWrapper"],
     .st-key-chart_resupply div[data-testid="stVerticalBlockBorderWrapper"],
-    .st-key-chart_terminal div[data-testid="stVerticalBlockBorderWrapper"] {
+    .st-key-chart_terminal div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-chart_fuel_price div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-chart_tariff div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-chart_dependency div[data-testid="stVerticalBlockBorderWrapper"] {
         border: 1.8px solid rgba(125, 211, 252, 0.72) !important;
         border-radius: 14px !important;
         background: linear-gradient(180deg, rgba(30, 64, 175, 0.12), rgba(14, 22, 32, 0.66)) !important;
@@ -875,6 +892,13 @@ except Exception as exc:
 last_sync = pd.to_datetime(file_mtime, unit="s").strftime("%d %b %Y %H:%M")
 st.caption(f"Data source: {file_to_use.name} | Last sync: {last_sync}")
 
+price_df, tariff_df = None, None
+if PRICE_FILE.exists():
+    try:
+        price_df, tariff_df = load_price_data(str(PRICE_FILE), mtime=PRICE_FILE.stat().st_mtime)
+    except Exception:
+        pass
+
 # Sidebar filters
 st.sidebar.title("🎛️ Filters")
 
@@ -975,7 +999,7 @@ with bottom_right:
 st.divider()
 
 # Main visualization area
-tab1, tab2 = st.tabs(["📊 Dashboard", "📦 Terminal Data"])
+tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📦 Terminal Data", "💰 Prices & Tariffs"])
 
 with tab1:
     # Row 1: Key Visualizations
@@ -1148,3 +1172,236 @@ with tab2:
             st.plotly_chart(fig_terminal, width='stretch')
     else:
         st.info("No terminal data available")
+
+with tab3:
+    if price_df is None or tariff_df is None:
+        st.warning(
+            "Price & tariff data file not found. "
+            "Place Transformed_for_Analysis.xlsx in the project folder."
+        )
+    else:
+        # ── Fuel Prices ───────────────────────────────────────────────
+        st.subheader("Fuel Prices")
+
+        latest_prices = (
+            price_df[price_df["Price_Type"] == "Retail"]
+            .dropna(subset=["Date", "Price"])
+            .sort_values("Date")
+            .drop_duplicates(subset=["Fuel"], keep="last")
+        )
+        if not latest_prices.empty:
+            price_kpi_items = [
+                (
+                    fuel_icon(row["Fuel"]),
+                    row["Fuel"],
+                    f"T${row['Price']:.2f}",
+                    CHART_COLORS[i % len(CHART_COLORS)],
+                )
+                for i, (_, row) in enumerate(latest_prices.iterrows())
+            ]
+            render_kpi_group(st, "Latest Retail Prices (T$/L)", price_kpi_items)
+            st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+
+        fp_col1, fp_col2 = st.columns(2)
+        price_type_sel = fp_col1.multiselect(
+            "Price Type",
+            options=sorted(price_df["Price_Type"].dropna().unique().tolist()),
+            default=sorted(price_df["Price_Type"].dropna().unique().tolist()),
+            key="fp_price_type",
+        )
+        fuel_sel_fp = fp_col2.multiselect(
+            "Fuel",
+            options=sorted(price_df["Fuel"].dropna().unique().tolist()),
+            default=sorted(price_df["Fuel"].dropna().unique().tolist()),
+            key="fp_fuel",
+        )
+
+        fp_filtered = price_df.copy()
+        if price_type_sel:
+            fp_filtered = fp_filtered[fp_filtered["Price_Type"].isin(price_type_sel)]
+        if fuel_sel_fp:
+            fp_filtered = fp_filtered[fp_filtered["Fuel"].isin(fuel_sel_fp)]
+        fp_filtered = fp_filtered.dropna(subset=["Date", "Price"]).sort_values("Date")
+
+        if not fp_filtered.empty:
+            fig_fp = px.line(
+                fp_filtered,
+                x="Date",
+                y="Price",
+                color="Fuel",
+                line_dash="Price_Type" if len(price_type_sel) > 1 else None,
+                color_discrete_sequence=CHART_COLORS,
+            )
+            apply_chart_theme(
+                fig_fp,
+                height=400,
+                hovermode="x unified",
+                x_title="Date",
+                y_title="Price (T$/L)",
+                date_x=True,
+            )
+            fig_fp.update_layout(title_text="")
+            with st.container(border=True, key="chart_fuel_price"):
+                render_chart_title(st, "Fuel Price Trends Over Time")
+                st.plotly_chart(fig_fp, width="stretch")
+        else:
+            st.info("No fuel price data matches the selected filters")
+
+        st.divider()
+
+        # ── Electricity Tariffs ───────────────────────────────────────
+        st.subheader("Electricity Tariffs")
+
+        _MONTH_NUM = {
+            "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+            "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+        }
+
+        def _parse_tariff_date(row):
+            try:
+                yr_start = int(str(row["Year"]).split("/")[0])
+                m = _MONTH_NUM.get(str(row["Month"]), 1)
+                yr = yr_start if m >= 7 else yr_start + 1
+                return pd.Timestamp(year=yr, month=m, day=1)
+            except Exception:
+                return pd.NaT
+
+        tr_work = tariff_df.copy()
+        tr_work["Period"] = tr_work.apply(_parse_tariff_date, axis=1)
+
+        main_components = ["Fuel Component", "Non Fuel component", "Total Tariff"]
+        tr_main = tr_work[tr_work["Component"].isin(main_components)].dropna(
+            subset=["Period", "Value"]
+        )
+
+        latest_year = tr_work["Year"].dropna().iloc[-1] if not tr_work.empty else ""
+        tr_latest_yr = tr_main[tr_main["Year"] == latest_year]
+        if not tr_latest_yr.empty:
+            avg_vals = tr_latest_yr.groupby("Component")["Value"].mean()
+            tariff_kpi_items = [
+                (
+                    "⛽" if c == "Fuel Component" else ("🔌" if "non fuel" in c.lower() else "📊"),
+                    c,
+                    f"T${v:.4f}/kWh",
+                    CHART_COLORS[i % len(CHART_COLORS)],
+                )
+                for i, (c, v) in enumerate(avg_vals.items())
+            ]
+            render_kpi_group(st, f"Average Tariff — {latest_year} (T$/kWh)", tariff_kpi_items)
+            st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+
+        comp_sel = st.multiselect(
+            "Tariff Component",
+            options=main_components,
+            default=main_components,
+            key="tariff_comp",
+        )
+        tr_filtered = (
+            tr_main[tr_main["Component"].isin(comp_sel)].sort_values("Period")
+            if comp_sel
+            else tr_main.sort_values("Period")
+        )
+
+        if not tr_filtered.empty:
+            fig_tr = px.line(
+                tr_filtered,
+                x="Period",
+                y="Value",
+                color="Component",
+                color_discrete_sequence=CHART_COLORS,
+            )
+            apply_chart_theme(
+                fig_tr,
+                height=400,
+                hovermode="x unified",
+                x_title="Period",
+                y_title="Tariff (T$/kWh)",
+                date_x=True,
+            )
+            fig_tr.update_layout(title_text="")
+            with st.container(border=True, key="chart_tariff"):
+                render_chart_title(st, "Electricity Tariff Components Over Time")
+                st.plotly_chart(fig_tr, width="stretch")
+        else:
+            st.info("No tariff data matches the selected filters")
+
+        fp_heatmap = price_df.copy()
+        if price_type_sel:
+            fp_heatmap = fp_heatmap[fp_heatmap["Price_Type"].isin(price_type_sel)]
+        if fuel_sel_fp:
+            fp_heatmap = fp_heatmap[fp_heatmap["Fuel"].isin(fuel_sel_fp)]
+        fp_heatmap = fp_heatmap.dropna(subset=["Date", "Price"])
+        fp_heatmap["Period"] = fp_heatmap["Date"].dt.to_period("M").dt.to_timestamp()
+        fp_heatmap["Series"] = fp_heatmap["Price_Type"] + " " + fp_heatmap["Fuel"]
+        fp_matrix = fp_heatmap.pivot_table(
+            index="Period",
+            columns="Series",
+            values="Price",
+            aggfunc="mean",
+        )
+
+        tr_heatmap = tr_main.copy()
+        if comp_sel:
+            tr_heatmap = tr_heatmap[tr_heatmap["Component"].isin(comp_sel)]
+        tr_matrix = tr_heatmap.pivot_table(
+            index="Period",
+            columns="Component",
+            values="Value",
+            aggfunc="mean",
+        )
+
+        dependency_frame = fp_matrix.join(tr_matrix, how="inner")
+        dependency_corr = dependency_frame.corr(numeric_only=True)
+
+        if not fp_matrix.empty and not tr_matrix.empty and not dependency_corr.empty and len(dependency_frame) >= 3:
+            fuel_series = fp_matrix.columns.tolist()
+            tariff_series = tr_matrix.columns.tolist()
+            dependency_view = dependency_corr.loc[fuel_series, tariff_series]
+
+            fig_dependency = go.Figure(
+                data=go.Heatmap(
+                    z=dependency_view.values,
+                    x=dependency_view.columns.tolist(),
+                    y=dependency_view.index.tolist(),
+                    colorscale="RdBu",
+                    zmin=-1,
+                    zmax=1,
+                    zmid=0,
+                    text=np.round(dependency_view.values, 2),
+                    texttemplate="%{text}",
+                    textfont={"size": 12},
+                    colorbar=dict(title="Correlation"),
+                    hovertemplate="Fuel Price: %{y}<br>Tariff: %{x}<br>Correlation: %{z:.2f}<extra></extra>",
+                )
+            )
+            fig_dependency.update_layout(
+                height=460,
+                paper_bgcolor="rgba(0, 0, 0, 0)",
+                plot_bgcolor="rgba(12, 18, 26, 0.86)",
+                font=dict(color="#E6EDF5", size=13),
+                margin=dict(l=16, r=16, t=24, b=16),
+                xaxis=dict(title="Tariff Component", side="bottom"),
+                yaxis=dict(title="Fuel Price Series"),
+            )
+            with st.container(border=True, key="chart_dependency"):
+                render_chart_title(st, "Fuel Price vs Tariff Dependence Heatmap")
+                st.caption("Correlation across overlapping monthly periods. Values closer to 1 move together more strongly; values near -1 move in opposite directions.")
+                st.plotly_chart(fig_dependency, width="stretch")
+        else:
+            st.info("Not enough overlapping monthly data to calculate a dependency heatmap")
+
+        st.divider()
+
+        dl_col1, dl_col2 = st.columns(2)
+        dl_col1.download_button(
+            "⬇️ Download Fuel Price Data",
+            data=to_csv(price_df),
+            file_name="fuel_prices.csv",
+            mime="text/csv",
+        )
+        dl_col2.download_button(
+            "⬇️ Download Tariff Data",
+            data=to_csv(tariff_df),
+            file_name="tariffs.csv",
+            mime="text/csv",
+        )
