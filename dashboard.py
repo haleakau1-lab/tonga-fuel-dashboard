@@ -5,6 +5,14 @@ import streamlit as st
 from pathlib import Path
 import numpy as np
 import base64
+import io
+
+try:
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
 
 st.set_page_config(page_title="Tonga National Fuel Supply & Consumption Dashboard", layout="wide")
 
@@ -871,6 +879,7 @@ st.markdown(
             min-width: 0;
         }
     }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -973,6 +982,131 @@ coverage_items = [
     (status_icon, "Status", cover_status, status_accent),
 ]
 
+stock_by_fuel = calculate_stock_by_fuel(filtered_actual)
+
+filter_text = {
+    "Company": ", ".join([str(x) for x in company_sel]) if company_sel else "All",
+    "Location": ", ".join([str(x) for x in location_sel]) if location_sel else "All",
+    "Fuel Type": ", ".join([str(x) for x in fuel_sel]) if fuel_sel else "All",
+    "Month": ", ".join([str(x) for x in month_sel]) if month_sel else "All",
+}
+
+stock_rows = []
+if not stock_by_fuel.empty:
+    for fuel_name, stock_value in stock_by_fuel.items():
+        stock_rows.append((str(fuel_name), float(stock_value)))
+
+latest_prices = pd.DataFrame(columns=["Price_Type", "Fuel", "Price"])
+if price_df is not None and not price_df.empty:
+    latest_prices = (
+        price_df.dropna(subset=["Date", "Price"])
+        .sort_values("Date")
+        .drop_duplicates(subset=["Price_Type", "Fuel"], keep="last")
+    )
+
+latest_tariff_year = ""
+latest_tariff_rows = []
+if tariff_df is not None and not tariff_df.empty:
+    tariff_main = tariff_df[tariff_df["Component"].isin(["Fuel Component", "Non Fuel component", "Total Tariff"])].copy()
+    if not tariff_main.empty:
+        latest_tariff_year = sorted(tariff_main["Year"].dropna().astype(str).unique().tolist())[-1]
+        tariff_avg = (
+            tariff_main[tariff_main["Year"].astype(str) == latest_tariff_year]
+            .groupby("Component", as_index=False)["Value"]
+            .mean()
+        )
+        latest_tariff_rows = [(str(r.Component), float(r.Value)) for r in tariff_avg.itertuples(index=False)]
+
+
+def build_summary_pdf_bytes():
+    if not REPORTLAB_AVAILABLE:
+        return None
+
+    pdf_buffer = io.BytesIO()
+    page_w, page_h = landscape(A4)
+    pdf = canvas.Canvas(pdf_buffer, pagesize=(page_w, page_h))
+
+    y = page_h - 30
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.drawString(24, y, "Tonga Fuel Dashboard - Weekly Summary")
+    y -= 18
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(24, y, f"Printed: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}")
+    y -= 12
+    pdf.drawString(24, y, f"Data Source: {file_to_use.name} | Last Sync: {last_sync}")
+    y -= 12
+    pdf.drawString(
+        24,
+        y,
+        (
+            f"Filters - Company: {filter_text['Company']} | Location: {filter_text['Location']} | "
+            f"Fuel: {filter_text['Fuel Type']} | Month: {filter_text['Month']}"
+        ),
+    )
+
+    y -= 20
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(24, y, "Key Metrics")
+    y -= 14
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(28, y, f"Total Fuel: {total_stock:,.0f} L")
+    pdf.drawString(220, y, f"Upcoming Supply: {upcoming_supply:,.0f} L")
+    pdf.drawString(430, y, f"Total Offtake: {total_consumption:,.0f} L")
+    pdf.drawString(620, y, f"Days of Cover: {days_of_cover:.2f} ({cover_status})")
+
+    y -= 22
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(24, y, "Stock by Fuel Type")
+    y -= 12
+    pdf.setFont("Helvetica", 9)
+    for fuel_name, stock_value in stock_rows[:8]:
+        pdf.drawString(28, y, f"{fuel_name}")
+        pdf.drawRightString(200, y, f"{stock_value:,.0f} L")
+        y -= 11
+    if not stock_rows:
+        pdf.drawString(28, y, "No stock data")
+        y -= 11
+
+    y -= 8
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(24, y, "Latest Fuel Prices (Retail/Wholesale)")
+    y -= 12
+    pdf.setFont("Helvetica", 9)
+    if not latest_prices.empty:
+        for row in latest_prices.itertuples(index=False):
+            pdf.drawString(28, y, f"{row.Price_Type} - {row.Fuel}")
+            pdf.drawRightString(260, y, f"{float(row.Price):.2f}")
+            y -= 11
+            if y < 110:
+                break
+    else:
+        pdf.drawString(28, y, "No fuel price data")
+        y -= 11
+
+    y -= 8
+    pdf.setFont("Helvetica-Bold", 10)
+    tariff_title = "Latest Average Tariff Components"
+    if latest_tariff_year:
+        tariff_title += f" ({latest_tariff_year})"
+    pdf.drawString(24, y, tariff_title)
+    y -= 12
+    pdf.setFont("Helvetica", 9)
+    if latest_tariff_rows:
+        for component_name, component_value in latest_tariff_rows[:8]:
+            pdf.drawString(28, y, component_name)
+            pdf.drawRightString(300, y, f"{component_value:.4f} T$/kWh")
+            y -= 11
+    else:
+        pdf.drawString(28, y, "No tariff data")
+
+    pdf.showPage()
+    pdf.save()
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
+
+
+summary_pdf_bytes = build_summary_pdf_bytes()
+
 # Row 1: Supply + Offtake (with group titles)
 top_supply_col, top_offtake_col = st.columns([2, 3], gap="small")
 render_kpi_group(top_supply_col, "Supply", supply_items)
@@ -981,7 +1115,6 @@ render_kpi_group(top_offtake_col, "Offtake Breakdown", offtake_items)
 st.markdown("<div style='height: 0.2rem;'></div>", unsafe_allow_html=True)
 
 # Row 2: Stock by Fuel (left) + Coverage (right)
-stock_by_fuel = calculate_stock_by_fuel(filtered_actual)
 bottom_left, bottom_right = st.columns([3, 2], gap="small")
 
 with bottom_left:
@@ -1405,3 +1538,23 @@ with tab3:
             file_name="tariffs.csv",
             mime="text/csv",
         )
+
+st.divider()
+pdf_col1, pdf_col2 = st.columns([1, 5])
+with pdf_col1:
+    if summary_pdf_bytes:
+        st.download_button(
+            "⬇️ Summary PDF",
+            data=summary_pdf_bytes,
+            file_name=f"fuel_dashboard_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+            key="download_summary_pdf",
+        )
+    else:
+        st.button("⬇️ Summary PDF", disabled=True, key="download_summary_pdf_disabled")
+
+with pdf_col2:
+    if summary_pdf_bytes:
+        st.caption("Saves a one-page weekly summary PDF directly to file.")
+    else:
+        st.caption("PDF export unavailable until reportlab is installed in this environment.")
