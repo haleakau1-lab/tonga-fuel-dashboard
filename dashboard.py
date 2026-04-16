@@ -911,6 +911,10 @@ if PRICE_FILE.exists():
 # Sidebar filters
 st.sidebar.title("🎛️ Filters")
 
+_SECTIONS = ["📊 Dashboard", "📦 Terminal Data", "💰 Prices & Tariffs"]
+active_section = st.sidebar.radio("Section", _SECTIONS, key="active_section", label_visibility="collapsed")
+st.sidebar.divider()
+
 companies = sorted([x for x in actual_df["Company"].dropna().unique()])
 locations = sorted([x for x in actual_df["Location"].dropna().unique()])
 fuels = sorted([x for x in actual_df["Fuel Type"].dropna().unique()])
@@ -920,15 +924,27 @@ months = (
     else []
 )
 
-company_filter_box = st.sidebar.container(border=True, key="filter_company_group")
-location_filter_box = st.sidebar.container(border=True, key="filter_location_group")
-fuel_filter_box = st.sidebar.container(border=True, key="filter_fuel_group")
-month_filter_box = st.sidebar.container(border=True, key="filter_month_group")
-
-company_sel = checkbox_slicer(company_filter_box, "Company", companies, "company")
-location_sel = checkbox_slicer(location_filter_box, "Location", locations, "location")
-fuel_sel = checkbox_slicer(fuel_filter_box, "Fuel Type", fuels, "fuel")
-month_sel = checkbox_slicer(month_filter_box, "Month", months, "month")
+if active_section != "💰 Prices & Tariffs":
+    company_filter_box = st.sidebar.container(border=True, key="filter_company_group")
+    location_filter_box = st.sidebar.container(border=True, key="filter_location_group")
+    fuel_filter_box = st.sidebar.container(border=True, key="filter_fuel_group")
+    month_filter_box = st.sidebar.container(border=True, key="filter_month_group")
+    company_sel = checkbox_slicer(company_filter_box, "Company", companies, "company")
+    location_sel = checkbox_slicer(location_filter_box, "Location", locations, "location")
+    fuel_sel = checkbox_slicer(fuel_filter_box, "Fuel Type", fuels, "fuel")
+    month_sel = checkbox_slicer(month_filter_box, "Month", months, "month")
+else:
+    company_sel = companies
+    location_sel = locations
+    fuel_sel = fuels
+    month_sel = months
+    # Price & Tariff sidebar filters
+    _price_opts = sorted(price_df["Price_Type"].dropna().unique().tolist()) if price_df is not None else []
+    _fuel_opts = sorted(price_df["Fuel"].dropna().unique().tolist()) if price_df is not None else []
+    _comp_opts = ["Fuel Component", "Non Fuel component", "Total Tariff"]
+    price_type_sel = st.sidebar.multiselect("Price Type", options=_price_opts, default=_price_opts, key="fp_price_type")
+    fuel_sel_fp = st.sidebar.multiselect("Fuel", options=_fuel_opts, default=_fuel_opts, key="fp_fuel")
+    comp_sel = st.sidebar.multiselect("Tariff Component", options=_comp_opts, default=_comp_opts, key="tariff_comp")
 
 actual_df_for_filter = actual_df.copy()
 if "Date" in actual_df_for_filter.columns:
@@ -1105,7 +1121,8 @@ def build_summary_pdf_bytes():
     return pdf_buffer.getvalue()
 
 
-summary_pdf_bytes = build_summary_pdf_bytes()
+if "summary_pdf_bytes" not in st.session_state:
+    st.session_state.summary_pdf_bytes = None
 
 # Row 1: Supply + Offtake (with group titles)
 top_supply_col, top_offtake_col = st.columns([2, 3], gap="small")
@@ -1132,9 +1149,7 @@ with bottom_right:
 st.divider()
 
 # Main visualization area
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📦 Terminal Data", "💰 Prices & Tariffs"])
-
-with tab1:
+if active_section == "📊 Dashboard":
     # Row 1: Key Visualizations
     col1, col2 = st.columns(2)
     
@@ -1268,7 +1283,7 @@ with tab1:
         else:
             st.info("No resupply data scheduled")
 
-with tab2:
+elif active_section == "📦 Terminal Data":
     st.subheader("Terminal Capacities")
     
     # Terminal data filters
@@ -1306,7 +1321,7 @@ with tab2:
     else:
         st.info("No terminal data available")
 
-with tab3:
+elif active_section == "💰 Prices & Tariffs":
     if price_df is None or tariff_df is None:
         st.warning(
             "Price & tariff data file not found. "
@@ -1334,20 +1349,6 @@ with tab3:
             ]
             render_kpi_group(st, "Latest Retail Prices (T$/L)", price_kpi_items)
             st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
-
-        fp_col1, fp_col2 = st.columns(2)
-        price_type_sel = fp_col1.multiselect(
-            "Price Type",
-            options=sorted(price_df["Price_Type"].dropna().unique().tolist()),
-            default=sorted(price_df["Price_Type"].dropna().unique().tolist()),
-            key="fp_price_type",
-        )
-        fuel_sel_fp = fp_col2.multiselect(
-            "Fuel",
-            options=sorted(price_df["Fuel"].dropna().unique().tolist()),
-            default=sorted(price_df["Fuel"].dropna().unique().tolist()),
-            key="fp_fuel",
-        )
 
         fp_filtered = price_df.copy()
         if price_type_sel:
@@ -1423,12 +1424,6 @@ with tab3:
             render_kpi_group(st, f"Average Tariff — {latest_year} (T$/kWh)", tariff_kpi_items)
             st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
 
-        comp_sel = st.multiselect(
-            "Tariff Component",
-            options=main_components,
-            default=main_components,
-            key="tariff_comp",
-        )
         tr_filtered = (
             tr_main[tr_main["Component"].isin(comp_sel)].sort_values("Period")
             if comp_sel
@@ -1523,38 +1518,24 @@ with tab3:
         else:
             st.info("Not enough overlapping monthly data to calculate a dependency heatmap")
 
-        st.divider()
 
-        dl_col1, dl_col2 = st.columns(2)
-        dl_col1.download_button(
-            "⬇️ Download Fuel Price Data",
-            data=to_csv(price_df),
-            file_name="fuel_prices.csv",
-            mime="text/csv",
-        )
-        dl_col2.download_button(
-            "⬇️ Download Tariff Data",
-            data=to_csv(tariff_df),
-            file_name="tariffs.csv",
-            mime="text/csv",
-        )
 
 st.divider()
 pdf_col1, pdf_col2 = st.columns([1, 5])
 with pdf_col1:
-    if summary_pdf_bytes:
+    if st.button("⬇️ Generate Summary PDF", key="generate_pdf_btn"):
+        st.session_state.summary_pdf_bytes = build_summary_pdf_bytes()
+    if st.session_state.summary_pdf_bytes:
         st.download_button(
-            "⬇️ Summary PDF",
-            data=summary_pdf_bytes,
+            "⬇️ Download Summary PDF",
+            data=st.session_state.summary_pdf_bytes,
             file_name=f"fuel_dashboard_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
             mime="application/pdf",
             key="download_summary_pdf",
         )
-    else:
-        st.button("⬇️ Summary PDF", disabled=True, key="download_summary_pdf_disabled")
 
 with pdf_col2:
-    if summary_pdf_bytes:
-        st.caption("Saves a one-page weekly summary PDF directly to file.")
+    if st.session_state.summary_pdf_bytes:
+        st.caption("PDF ready — click Download to save.")
     else:
-        st.caption("PDF export unavailable until reportlab is installed in this environment.")
+        st.caption("Click Generate to build the summary PDF.")
