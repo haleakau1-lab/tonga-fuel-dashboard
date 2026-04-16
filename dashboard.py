@@ -1353,6 +1353,25 @@ elif active_section == "💰 Prices & Tariffs":
             render_kpi_group(st, "Latest Retail Prices (T$/L)", price_kpi_items)
             st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
 
+            highest_price_row = latest_prices.loc[latest_prices["Price"].idxmax()]
+            lowest_price_row = latest_prices.loc[latest_prices["Price"].idxmin()]
+            price_extreme_items = [
+                (
+                    "📈",
+                    f"Highest ({highest_price_row['Fuel']})",
+                    f"T${highest_price_row['Price']:.2f}",
+                    "#EF4444",
+                ),
+                (
+                    "📉",
+                    f"Lowest ({lowest_price_row['Fuel']})",
+                    f"T${lowest_price_row['Price']:.2f}",
+                    "#22C55E",
+                ),
+            ]
+            render_kpi_group(st, "Retail Price Extremes (Latest)", price_extreme_items)
+            st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+
         fp_filtered = price_df.copy()
         if price_type_sel:
             fp_filtered = fp_filtered[fp_filtered["Price_Type"].isin(price_type_sel)]
@@ -1414,8 +1433,47 @@ elif active_section == "💰 Prices & Tariffs":
         latest_year = tr_work["Year"].dropna().iloc[-1] if not tr_work.empty else ""
         tr_latest_yr = tr_main[tr_main["Year"] == latest_year]
         if not tr_latest_yr.empty:
+            latest_period = tr_latest_yr["Period"].max()
+            tr_current = tr_latest_yr[tr_latest_yr["Period"] == latest_period]
+            current_vals = tr_current.groupby("Component")["Value"].mean()
+            current_kpi_items = [
+                (
+                    "⛽" if c == "Fuel Component" else ("🔌" if "non fuel" in c.lower() else "📊"),
+                    c,
+                    f"T${v:.4f}/kWh",
+                    CHART_COLORS[i % len(CHART_COLORS)],
+                )
+                for i, (c, v) in enumerate(current_vals.items())
+            ]
+            render_kpi_group(
+                st,
+                f"Current Tariff — {pd.Timestamp(latest_period).strftime('%b %Y')} (T$/kWh)",
+                current_kpi_items,
+            )
+            st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+
+            if not current_vals.empty:
+                highest_current_comp = current_vals.idxmax()
+                lowest_current_comp = current_vals.idxmin()
+                current_extreme_items = [
+                    (
+                        "📈",
+                        f"Highest ({highest_current_comp})",
+                        f"T${current_vals[highest_current_comp]:.4f}/kWh",
+                        "#EF4444",
+                    ),
+                    (
+                        "📉",
+                        f"Lowest ({lowest_current_comp})",
+                        f"T${current_vals[lowest_current_comp]:.4f}/kWh",
+                        "#22C55E",
+                    ),
+                ]
+                render_kpi_group(st, "Current Tariff Extremes", current_extreme_items)
+                st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+
             avg_vals = tr_latest_yr.groupby("Component")["Value"].mean()
-            tariff_kpi_items = [
+            average_kpi_items = [
                 (
                     "⛽" if c == "Fuel Component" else ("🔌" if "non fuel" in c.lower() else "📊"),
                     c,
@@ -1424,8 +1482,28 @@ elif active_section == "💰 Prices & Tariffs":
                 )
                 for i, (c, v) in enumerate(avg_vals.items())
             ]
-            render_kpi_group(st, f"Average Tariff — {latest_year} (T$/kWh)", tariff_kpi_items)
+            render_kpi_group(st, f"Average Tariff — {latest_year} (T$/kWh)", average_kpi_items)
             st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+
+            if not avg_vals.empty:
+                highest_avg_comp = avg_vals.idxmax()
+                lowest_avg_comp = avg_vals.idxmin()
+                avg_extreme_items = [
+                    (
+                        "📈",
+                        f"Highest ({highest_avg_comp})",
+                        f"T${avg_vals[highest_avg_comp]:.4f}/kWh",
+                        "#EF4444",
+                    ),
+                    (
+                        "📉",
+                        f"Lowest ({lowest_avg_comp})",
+                        f"T${avg_vals[lowest_avg_comp]:.4f}/kWh",
+                        "#22C55E",
+                    ),
+                ]
+                render_kpi_group(st, "Average Tariff Extremes", avg_extreme_items)
+                st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
 
         tr_filtered = (
             tr_main[tr_main["Component"].isin(comp_sel)].sort_values("Period")
