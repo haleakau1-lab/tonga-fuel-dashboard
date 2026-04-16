@@ -911,7 +911,7 @@ if PRICE_FILE.exists():
 # Sidebar filters
 st.sidebar.title("🎛️ Filters")
 
-_SECTIONS = ["📊 Dashboard", "📦 Terminal Data", "💰 Prices & Tariffs"]
+_SECTIONS = ["📊 Fuel Supply", "📦 Terminal Data", "💰 Prices & Tariffs"]
 active_section = st.sidebar.radio("Section", _SECTIONS, key="active_section", label_visibility="collapsed")
 st.sidebar.divider()
 
@@ -942,9 +942,12 @@ else:
     _price_opts = sorted(price_df["Price_Type"].dropna().unique().tolist()) if price_df is not None else []
     _fuel_opts = sorted(price_df["Fuel"].dropna().unique().tolist()) if price_df is not None else []
     _comp_opts = ["Fuel Component", "Non Fuel component", "Total Tariff"]
-    price_type_sel = st.sidebar.multiselect("Price Type", options=_price_opts, default=_price_opts, key="fp_price_type")
-    fuel_sel_fp = st.sidebar.multiselect("Fuel", options=_fuel_opts, default=_fuel_opts, key="fp_fuel")
-    comp_sel = st.sidebar.multiselect("Tariff Component", options=_comp_opts, default=_comp_opts, key="tariff_comp")
+    price_type_filter_box = st.sidebar.container(border=True, key="filter_price_type_group")
+    price_fuel_filter_box = st.sidebar.container(border=True, key="filter_price_fuel_group")
+    tariff_comp_filter_box = st.sidebar.container(border=True, key="filter_tariff_comp_group")
+    price_type_sel = checkbox_slicer(price_type_filter_box, "Price Type", _price_opts, "fp_price_type")
+    fuel_sel_fp = checkbox_slicer(price_fuel_filter_box, "Fuel", _fuel_opts, "fp_fuel")
+    comp_sel = checkbox_slicer(tariff_comp_filter_box, "Tariff Component", _comp_opts, "tariff_comp")
 
 actual_df_for_filter = actual_df.copy()
 if "Date" in actual_df_for_filter.columns:
@@ -1149,7 +1152,7 @@ with bottom_right:
 st.divider()
 
 # Main visualization area
-if active_section == "📊 Dashboard":
+if active_section == "📊 Fuel Supply":
     # Row 1: Key Visualizations
     col1, col2 = st.columns(2)
     
