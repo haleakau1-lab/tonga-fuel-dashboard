@@ -183,6 +183,43 @@ def checkbox_slicer(container, title, options, key_prefix):
     return selected
 
 
+def checkbox_slicer_horizontal(container, title, options, key_prefix):
+    """Render checkbox options in a single horizontal row and return selected items."""
+    container.markdown(f'<div class="filter-title-chip">{title}</div>', unsafe_allow_html=True)
+
+    clear_pending_key = f"{key_prefix}_clear_pending"
+
+    for idx, _ in enumerate(options):
+        option_key = f"{key_prefix}_{idx}"
+        if option_key not in st.session_state:
+            st.session_state[option_key] = True
+
+    if st.session_state.get(clear_pending_key, False):
+        for idx, _ in enumerate(options):
+            st.session_state[f"{key_prefix}_{idx}"] = False
+        st.session_state[clear_pending_key] = False
+
+    selected = []
+    if options:
+        row_cols = container.columns([1] * len(options) + [0.7], gap="small")
+        for idx, option in enumerate(options):
+            with row_cols[idx]:
+                checked = st.checkbox(str(option), key=f"{key_prefix}_{idx}")
+            if checked:
+                selected.append(option)
+
+        with row_cols[-1]:
+            if st.button("Clear", key=f"{key_prefix}_clear"):
+                st.session_state[clear_pending_key] = True
+                st.rerun()
+    else:
+        if container.button("Clear", key=f"{key_prefix}_clear"):
+            st.session_state[clear_pending_key] = True
+            st.rerun()
+
+    return selected
+
+
 def format_compact(value):
     """Format numbers using compact K/M suffixes for KPI cards."""
     if pd.isna(value):
@@ -196,7 +233,7 @@ def format_compact(value):
 
 
 def fuel_icon(fuel_name):
-    """Return a simple icon for fuel KPI labels."""
+    """Return a compact icon per fuel label for KPI readability."""
     fuel_text = str(fuel_name).strip().lower()
     if "diesel" in fuel_text:
         return "🛢️"
@@ -282,7 +319,7 @@ def set_app_background(image_path):
         f"""
         <style>
         .stApp {{
-            background-image: linear-gradient(rgba(8, 13, 20, 0.68), rgba(8, 13, 20, 0.68)), url("data:image/jpeg;base64,{encoded}");
+            background-image: linear-gradient(rgba(8, 13, 20, 0.44), rgba(8, 13, 20, 0.44)), url("data:image/jpeg;base64,{encoded}");
             background-size: cover;
             background-position: center;
             background-attachment: fixed;
@@ -291,7 +328,7 @@ def set_app_background(image_path):
         /* Dark theme: even stronger overlay for max contrast */
         @media (prefers-color-scheme: dark) {{
             .stApp {{
-                background-image: linear-gradient(rgba(5, 9, 14, 0.78), rgba(5, 9, 14, 0.78)), url("data:image/jpeg;base64,{encoded}");
+                background-image: linear-gradient(rgba(5, 9, 14, 0.55), rgba(5, 9, 14, 0.55)), url("data:image/jpeg;base64,{encoded}");
             }}
         }}
 
@@ -357,12 +394,18 @@ def apply_chart_theme(fig, height=400, hovermode=None, x_title=None, y_title=Non
 set_app_background(BACKGROUND_FILE)
 
 logo_html = ""
+footer_logo_html = ""
 if LOGO_FILE.exists():
     logo_b64 = base64.b64encode(LOGO_FILE.read_bytes()).decode("utf-8")
     logo_html = (
         f'<img src="data:image/jpeg;base64,{logo_b64}" '
         'style="height:78px; width:auto; object-fit:contain; border-radius:8px; margin-right:0.75rem; border:1px solid rgba(173, 191, 210, 0.45);" '
         'alt="Organization Logo" />'
+    )
+    footer_logo_html = (
+        f'<img src="data:image/jpeg;base64,{logo_b64}" '
+        'style="height:30px; width:auto; object-fit:contain; border-radius:4px;" '
+        'alt="DOE Logo" />'
     )
 
 st.markdown(
@@ -555,10 +598,14 @@ st.markdown(
     .st-key-filter_location_group,
     .st-key-filter_fuel_group,
     .st-key-filter_month_group,
+    .st-key-terminal_location_filter_box,
+    .st-key-terminal_type_filter_box,
     .st-key-filter_company_group div[data-testid="stVerticalBlockBorderWrapper"],
     .st-key-filter_location_group div[data-testid="stVerticalBlockBorderWrapper"],
     .st-key-filter_fuel_group div[data-testid="stVerticalBlockBorderWrapper"],
-    .st-key-filter_month_group div[data-testid="stVerticalBlockBorderWrapper"] {
+    .st-key-filter_month_group div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-terminal_location_filter_box div[data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-terminal_type_filter_box div[data-testid="stVerticalBlockBorderWrapper"] {
         border: 1.8px solid rgba(125, 211, 252, 0.72) !important;
         border-radius: 14px !important;
         background: linear-gradient(180deg, rgba(30, 64, 175, 0.12), rgba(14, 22, 32, 0.66)) !important;
@@ -899,7 +946,6 @@ except Exception as exc:
     st.stop()
 
 last_sync = pd.to_datetime(file_mtime, unit="s").strftime("%d %b %Y %H:%M")
-st.caption(f"Data source: {file_to_use.name} | Last sync: {last_sync}")
 
 price_df, tariff_df = None, None
 if PRICE_FILE.exists():
@@ -1290,12 +1336,14 @@ elif active_section == "📦 Terminal Data":
     st.subheader("Terminal Capacities")
     
     # Terminal data filters
-    t_col1, t_col2 = st.columns(2)
     t_locations = sorted([x for x in terminal_df["Location"].dropna().unique()])
     t_info = sorted([x for x in terminal_df["Terminal Info"].dropna().unique()])
-    
-    t_loc_sel = checkbox_slicer(t_col1, "Terminal Location", t_locations, "t_loc")
-    t_info_sel = checkbox_slicer(t_col2, "Terminal Type", t_info, "t_info")
+
+    t_col1, t_col2 = st.columns(2)
+    t_loc_box = t_col1.container(border=True, key="terminal_location_filter_box")
+    t_info_box = t_col2.container(border=True, key="terminal_type_filter_box")
+    t_loc_sel = checkbox_slicer_horizontal(t_loc_box, "Terminal Location", t_locations, "t_loc")
+    t_info_sel = checkbox_slicer_horizontal(t_info_box, "Terminal Type", t_info, "t_info")
     
     filtered_terminal = terminal_df[
         terminal_df["Location"].isin(t_loc_sel)
@@ -1351,25 +1399,6 @@ elif active_section == "💰 Prices & Tariffs":
                 for i, (_, row) in enumerate(latest_prices.iterrows())
             ]
             render_kpi_group(st, "Latest Retail Prices (T$/L)", price_kpi_items)
-            st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
-
-            highest_price_row = latest_prices.loc[latest_prices["Price"].idxmax()]
-            lowest_price_row = latest_prices.loc[latest_prices["Price"].idxmin()]
-            price_extreme_items = [
-                (
-                    "📈",
-                    f"Highest ({highest_price_row['Fuel']})",
-                    f"T${highest_price_row['Price']:.2f}",
-                    "#EF4444",
-                ),
-                (
-                    "📉",
-                    f"Lowest ({lowest_price_row['Fuel']})",
-                    f"T${lowest_price_row['Price']:.2f}",
-                    "#22C55E",
-                ),
-            ]
-            render_kpi_group(st, "Retail Price Extremes (Latest)", price_extreme_items)
             st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
 
         fp_filtered = price_df.copy()
@@ -1433,6 +1462,8 @@ elif active_section == "💰 Prices & Tariffs":
         latest_year = tr_work["Year"].dropna().iloc[-1] if not tr_work.empty else ""
         tr_latest_yr = tr_main[tr_main["Year"] == latest_year]
         if not tr_latest_yr.empty:
+            current_tariff_col, average_tariff_col = st.columns(2)
+
             latest_period = tr_latest_yr["Period"].max()
             tr_current = tr_latest_yr[tr_latest_yr["Period"] == latest_period]
             current_vals = tr_current.groupby("Component")["Value"].mean()
@@ -1446,31 +1477,10 @@ elif active_section == "💰 Prices & Tariffs":
                 for i, (c, v) in enumerate(current_vals.items())
             ]
             render_kpi_group(
-                st,
+                current_tariff_col,
                 f"Current Tariff — {pd.Timestamp(latest_period).strftime('%b %Y')} (T$/kWh)",
                 current_kpi_items,
             )
-            st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
-
-            if not current_vals.empty:
-                highest_current_comp = current_vals.idxmax()
-                lowest_current_comp = current_vals.idxmin()
-                current_extreme_items = [
-                    (
-                        "📈",
-                        f"Highest ({highest_current_comp})",
-                        f"T${current_vals[highest_current_comp]:.4f}/kWh",
-                        "#EF4444",
-                    ),
-                    (
-                        "📉",
-                        f"Lowest ({lowest_current_comp})",
-                        f"T${current_vals[lowest_current_comp]:.4f}/kWh",
-                        "#22C55E",
-                    ),
-                ]
-                render_kpi_group(st, "Current Tariff Extremes", current_extreme_items)
-                st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
 
             avg_vals = tr_latest_yr.groupby("Component")["Value"].mean()
             average_kpi_items = [
@@ -1482,28 +1492,8 @@ elif active_section == "💰 Prices & Tariffs":
                 )
                 for i, (c, v) in enumerate(avg_vals.items())
             ]
-            render_kpi_group(st, f"Average Tariff — {latest_year} (T$/kWh)", average_kpi_items)
+            render_kpi_group(average_tariff_col, f"Average Tariff — {latest_year} (T$/kWh)", average_kpi_items)
             st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
-
-            if not avg_vals.empty:
-                highest_avg_comp = avg_vals.idxmax()
-                lowest_avg_comp = avg_vals.idxmin()
-                avg_extreme_items = [
-                    (
-                        "📈",
-                        f"Highest ({highest_avg_comp})",
-                        f"T${avg_vals[highest_avg_comp]:.4f}/kWh",
-                        "#EF4444",
-                    ),
-                    (
-                        "📉",
-                        f"Lowest ({lowest_avg_comp})",
-                        f"T${avg_vals[lowest_avg_comp]:.4f}/kWh",
-                        "#22C55E",
-                    ),
-                ]
-                render_kpi_group(st, "Average Tariff Extremes", avg_extreme_items)
-                st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
 
         tr_filtered = (
             tr_main[tr_main["Component"].isin(comp_sel)].sort_values("Period")
@@ -1620,3 +1610,28 @@ with pdf_col2:
         st.caption("PDF ready — click Download to save.")
     else:
         st.caption("Click Generate to build the summary PDF.")
+
+st.markdown(
+    f"""
+    <div style="
+        margin-top: 0.6rem;
+        padding: 0.52rem 0.75rem;
+        background: rgba(229, 231, 235, 0.95);
+        border: 1px solid rgba(209, 213, 219, 0.95);
+        color: #4B5563;
+        font-size: 0.88rem;
+        line-height: 1.35;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 0.7rem;
+        flex-wrap: wrap;
+        text-align: center;
+        border-radius: 12px;
+    ">
+        {footer_logo_html}
+        <span>Developed by Department of Energy under Ministry of MEIDECC for Staged Energy and Fuel Supply Plan Monitoring | Data updated: {last_sync}</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
