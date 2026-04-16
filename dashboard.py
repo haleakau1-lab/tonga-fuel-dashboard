@@ -1382,24 +1382,49 @@ elif active_section == "💰 Prices & Tariffs":
         # ── Fuel Prices ───────────────────────────────────────────────
         st.subheader("Fuel Prices")
 
-        latest_prices = (
-            price_df[price_df["Price_Type"] == "Retail"]
-            .dropna(subset=["Date", "Price"])
-            .sort_values("Date")
+        latest_price_base = price_df.dropna(subset=["Date", "Price"]).sort_values("Date")
+        latest_retail_prices = (
+            latest_price_base[latest_price_base["Price_Type"] == "Retail"]
             .drop_duplicates(subset=["Fuel"], keep="last")
         )
-        if not latest_prices.empty:
-            price_kpi_items = [
-                (
-                    fuel_icon(row["Fuel"]),
-                    row["Fuel"],
-                    f"T${row['Price']:.2f}",
-                    CHART_COLORS[i % len(CHART_COLORS)],
-                )
-                for i, (_, row) in enumerate(latest_prices.iterrows())
-            ]
-            render_kpi_group(st, "Latest Retail Prices (T$/L)", price_kpi_items)
-            st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+        latest_wholesale_prices = (
+            latest_price_base[latest_price_base["Price_Type"] == "Wholesale"]
+            .drop_duplicates(subset=["Fuel"], keep="last")
+        )
+
+        wholesale_col, retail_col = st.columns(2)
+
+        with wholesale_col:
+            if not latest_wholesale_prices.empty:
+                wholesale_kpi_items = [
+                    (
+                        fuel_icon(row["Fuel"]),
+                        row["Fuel"],
+                        f"T${row['Price']:.2f}",
+                        CHART_COLORS[i % len(CHART_COLORS)],
+                    )
+                    for i, (_, row) in enumerate(latest_wholesale_prices.iterrows())
+                ]
+                render_kpi_group(st, "Latest Wholesale Prices (T$/L)", wholesale_kpi_items)
+            else:
+                st.info("No wholesale price data available")
+
+        with retail_col:
+            if not latest_retail_prices.empty:
+                retail_kpi_items = [
+                    (
+                        fuel_icon(row["Fuel"]),
+                        row["Fuel"],
+                        f"T${row['Price']:.2f}",
+                        CHART_COLORS[i % len(CHART_COLORS)],
+                    )
+                    for i, (_, row) in enumerate(latest_retail_prices.iterrows())
+                ]
+                render_kpi_group(st, "Latest Retail Prices (T$/L)", retail_kpi_items)
+            else:
+                st.info("No retail price data available")
+
+        st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
 
         fp_filtered = price_df.copy()
         if price_type_sel:
