@@ -1346,7 +1346,8 @@ elif active_section == "📦 Terminal Data":
     t_info_sel = checkbox_slicer_horizontal(t_info_box, "Terminal Type", t_info, "t_info")
     
     filtered_terminal = terminal_df[
-        terminal_df["Location"].isin(t_loc_sel)
+        terminal_df["Company"].isin(company_sel)
+        & terminal_df["Location"].isin(t_loc_sel)
         & terminal_df["Terminal Info"].isin(t_info_sel)
     ].copy()
     
@@ -1371,6 +1372,185 @@ elif active_section == "📦 Terminal Data":
             st.plotly_chart(fig_terminal, width='stretch')
     else:
         st.info("No terminal data available")
+
+    # Company-level comparison of current stock against available terminal capacity.
+    stock_company_base = filtered_actual.dropna(subset=["Company", "Date", "Closing Stock"])
+    terminal_company_base = filtered_terminal.dropna(subset=["Company", "Quantity"])
+
+    stock_by_company = pd.DataFrame(columns=["Company", "Current Stock (L)"])
+    if not stock_company_base.empty:
+        latest_stock_company = stock_company_base.sort_values("Date").drop_duplicates(
+            subset=["Company", "Location", "Fuel Type"], keep="last"
+        )
+        stock_by_company = (
+            latest_stock_company.groupby("Company", as_index=False)["Closing Stock"]
+            .sum()
+            .rename(columns={"Closing Stock": "Current Stock (L)"})
+        )
+
+    capacity_by_company = pd.DataFrame(columns=["Company", "Terminal Capacity (L)"])
+    if not terminal_company_base.empty:
+        capacity_by_company = (
+            terminal_company_base.groupby("Company", as_index=False)["Quantity"]
+            .sum()
+            .rename(columns={"Quantity": "Terminal Capacity (L)"})
+        )
+
+    company_compare = pd.merge(stock_by_company, capacity_by_company, on="Company", how="outer").fillna(0)
+
+    if not company_compare.empty:
+        company_compare["Utilization (%)"] = np.where(
+            company_compare["Terminal Capacity (L)"] > 0,
+            (company_compare["Current Stock (L)"] / company_compare["Terminal Capacity (L)"]) * 100,
+            np.nan,
+        )
+        company_compare = company_compare.sort_values("Terminal Capacity (L)", ascending=False)
+
+        # Battery-style view: show how full each company's storage is.
+        battery_df = company_compare[["Company", "Utilization (%)"]].copy()
+        battery_df["Utilization (%)"] = battery_df["Utilization (%)"].clip(lower=0, upper=100)
+        battery_df["Remaining (%)"] = 100 - battery_df["Utilization (%)"]
+        battery_df["Status"] = np.select(
+            [
+                battery_df["Utilization (%)"] < 30,
+                battery_df["Utilization (%)"].between(30, 60, inclusive="left"),
+            ],
+            ["Low", "Medium"],
+            default="High",
+        )
+
+        fig_battery = go.Figure()
+        fig_battery.add_trace(
+            go.Bar(
+                y=battery_df["Company"],
+                x=battery_df["Utilization (%)"],
+                orientation="h",
+                name="Filled",
+                marker=dict(
+                    color=np.where(
+                        battery_df["Status"] == "Low",
+                        "#EF4444",
+                        np.where(battery_df["Status"] == "Medium", "#F59E0B", "#22C55E"),
+                    ),
+                ),
+                text=[f"{v:.1f}%" for v in battery_df["Utilization (%)"]],
+                textposition="inside",
+                insidetextanchor="middle",
+                hovertemplate="Company=%{y}<br>Fill=%{x:.1f}%<extra></extra>",
+            )
+        )
+        fig_battery.add_trace(
+            go.Bar(
+                y=battery_df["Company"],
+                x=battery_df["Remaining (%)"],
+                orientation="h",
+                name="Remaining",
+                marker=dict(color="rgba(148, 163, 184, 0.35)"),
+                hovertemplate="Company=%{y}<br>Remaining=%{x:.1f}%<extra></extra>",
+            )
+        )
+        apply_chart_theme(fig_battery, height=350, x_title="Terminal Fill Level (%)", y_title="Company")
+        fig_battery.update_layout(
+            barmode="stack",
+            title_text="",
+            xaxis=dict(range=[0, 100], ticksuffix="%"),
+            legend_title_text="",
+        )
+
+        with st.container(border=True, key="chart_battery_stock_capacity"):
+            render_chart_title(st, "Terminal Fill Level by Company")
+            st.plotly_chart(fig_battery, width="stretch")
+    else:
+        st.info("No company data available for stock vs capacity comparison")
+
+    # Location-level comparison and battery/discharge view.
+    stock_location_base = filtered_actual.dropna(subset=["Location", "Date", "Closing Stock"])
+    terminal_location_base = filtered_terminal.dropna(subset=["Location", "Quantity"])
+
+    stock_by_location = pd.DataFrame(columns=["Location", "Current Stock (L)"])
+    if not stock_location_base.empty:
+        latest_stock_location = stock_location_base.sort_values("Date").drop_duplicates(
+            subset=["Company", "Location", "Fuel Type"], keep="last"
+        )
+        stock_by_location = (
+            latest_stock_location.groupby("Location", as_index=False)["Closing Stock"]
+            .sum()
+            .rename(columns={"Closing Stock": "Current Stock (L)"})
+        )
+
+    capacity_by_location = pd.DataFrame(columns=["Location", "Terminal Capacity (L)"])
+    if not terminal_location_base.empty:
+        capacity_by_location = (
+            terminal_location_base.groupby("Location", as_index=False)["Quantity"]
+            .sum()
+            .rename(columns={"Quantity": "Terminal Capacity (L)"})
+        )
+
+    location_compare = pd.merge(stock_by_location, capacity_by_location, on="Location", how="outer").fillna(0)
+
+    if not location_compare.empty:
+        location_compare["Utilization (%)"] = np.where(
+            location_compare["Terminal Capacity (L)"] > 0,
+            (location_compare["Current Stock (L)"] / location_compare["Terminal Capacity (L)"]) * 100,
+            np.nan,
+        )
+        location_compare = location_compare.sort_values("Terminal Capacity (L)", ascending=False)
+
+        battery_loc_df = location_compare[["Location", "Utilization (%)"]].copy()
+        battery_loc_df["Utilization (%)"] = battery_loc_df["Utilization (%)"].clip(lower=0, upper=100)
+        battery_loc_df["Remaining (%)"] = 100 - battery_loc_df["Utilization (%)"]
+        battery_loc_df["Status"] = np.select(
+            [
+                battery_loc_df["Utilization (%)"] < 30,
+                battery_loc_df["Utilization (%)"].between(30, 60, inclusive="left"),
+            ],
+            ["Low", "Medium"],
+            default="High",
+        )
+
+        fig_battery_location = go.Figure()
+        fig_battery_location.add_trace(
+            go.Bar(
+                y=battery_loc_df["Location"],
+                x=battery_loc_df["Utilization (%)"],
+                orientation="h",
+                name="Filled",
+                marker=dict(
+                    color=np.where(
+                        battery_loc_df["Status"] == "Low",
+                        "#EF4444",
+                        np.where(battery_loc_df["Status"] == "Medium", "#F59E0B", "#22C55E"),
+                    ),
+                ),
+                text=[f"{v:.1f}%" for v in battery_loc_df["Utilization (%)"]],
+                textposition="inside",
+                insidetextanchor="middle",
+                hovertemplate="Location=%{y}<br>Fill=%{x:.1f}%<extra></extra>",
+            )
+        )
+        fig_battery_location.add_trace(
+            go.Bar(
+                y=battery_loc_df["Location"],
+                x=battery_loc_df["Remaining (%)"],
+                orientation="h",
+                name="Remaining",
+                marker=dict(color="rgba(148, 163, 184, 0.35)"),
+                hovertemplate="Location=%{y}<br>Remaining=%{x:.1f}%<extra></extra>",
+            )
+        )
+        apply_chart_theme(fig_battery_location, height=320, x_title="Terminal Fill Level (%)", y_title="Location")
+        fig_battery_location.update_layout(
+            barmode="stack",
+            title_text="",
+            xaxis=dict(range=[0, 100], ticksuffix="%"),
+            legend_title_text="",
+        )
+
+        with st.container(border=True, key="chart_battery_stock_capacity_location"):
+            render_chart_title(st, "Terminal Fill Level by Location")
+            st.plotly_chart(fig_battery_location, width="stretch")
+    else:
+        st.info("No location data available for stock vs capacity comparison")
 
 elif active_section == "💰 Prices & Tariffs":
     if price_df is None or tariff_df is None:
