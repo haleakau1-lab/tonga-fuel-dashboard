@@ -6,6 +6,9 @@ from pathlib import Path
 import numpy as np
 import base64
 import io
+import hashlib
+import json
+from datetime import datetime, timedelta
 
 try:
     from reportlab.lib.pagesizes import A4, landscape
@@ -17,39 +20,103 @@ except ImportError:
 st.set_page_config(page_title="Tonga National Fuel Supply & Consumption Dashboard", layout="wide")
 
 BASE_DIR = Path(__file__).resolve().parent
-
-
-def resolve_existing_path(candidates):
-    for candidate in candidates:
-        path = Path(candidate)
-        if path.exists():
-            return path
-    return Path(candidates[0])
-
-
-DEFAULT_FILE = resolve_existing_path(
-    [
-        BASE_DIR / "Oil_Data_Consolidated.xlsx",
-        Path(r"c:\Users\halea\Nextcloud\Documents\Petroleum\Oil_Data_Consolidated.xlsx"),
-        BASE_DIR / "Oil_Data_Consolidated_updated.xlsx",
-    ]
-)
-BACKGROUND_FILE = resolve_existing_path(
-    [
-        BASE_DIR / "background.jpg",
-        BASE_DIR.parent / "doe-website" / "background.jpg",
-        Path(r"c:\Users\halea\Nextcloud\Documents\doe-website\background.jpg"),
-    ]
-)
-LOGO_FILE = resolve_existing_path(
-    [
-        BASE_DIR / "tonga-energy-logo.jpg",
-        BASE_DIR.parent / "doe-website" / "public" / "assets" / "tonga-energy-logo.jpg",
-        Path(r"c:\Users\halea\Nextcloud\Documents\doe-website\public\assets\tonga-energy-logo.jpg"),
-    ]
-)
-CHART_COLORS = ["#7DD3FC", "#60A5FA", "#A78BFA", "#F59E0B", "#34D399"]
+DEFAULT_FILE = BASE_DIR / "Oil_Data_Consolidated.xlsx"
 PRICE_FILE = BASE_DIR / "Transformed_for_Analysis.xlsx"
+LOGO_FILE = BASE_DIR / "tonga-energy-logo.jpg"
+BACKGROUND_FILE = BASE_DIR / "background.jpg"
+FUEL_COMPANY_DIR = BASE_DIR / "Fuel Company"
+FORECAST_ENTRY_FILE = BASE_DIR / "Forecast_Entries.csv"
+CHART_COLORS = ["#38BDF8", "#F97316", "#34D399", "#FBBF24", "#A78BFA", "#FB7185"]
+
+# Authentication credentials (can be changed or moved to environment variables)
+CREDENTIALS_FILE = BASE_DIR / "credentials.json"
+
+# Default credentials - will be used if credentials.json doesn't exist
+DEFAULT_CREDENTIALS = {
+    "admin": "admin123",  # username: password
+    "operator": "operator123"
+}
+
+
+def hash_password(password):
+    """Hash password for storage."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def load_credentials():
+    """Load credentials from file or return defaults."""
+    if CREDENTIALS_FILE.exists():
+        try:
+            with open(CREDENTIALS_FILE, 'r') as f:
+                loaded = json.load(f)
+            normalized = {}
+            for username, password in loaded.items():
+                password_text = str(password)
+                is_hash = len(password_text) == 64 and all(ch in "0123456789abcdef" for ch in password_text.lower())
+                normalized[str(username)] = password_text if is_hash else hash_password(password_text)
+            return normalized
+        except Exception:
+            pass
+
+    return {username: hash_password(password) for username, password in DEFAULT_CREDENTIALS.items()}
+
+
+def authenticate_user(username, password):
+    """Validate a username and password against the configured credential store."""
+    credentials = load_credentials()
+    return credentials.get(str(username).strip()) == hash_password(password)
+
+
+def init_session_state():
+    """Initialize authentication-related session state."""
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if "username" not in st.session_state:
+        st.session_state.username = None
+    if "auth_time" not in st.session_state:
+        st.session_state.auth_time = None
+
+
+def check_session_timeout(timeout_hours=8):
+    """Return True when the login session is valid and unexpired."""
+    if not st.session_state.get("authenticated"):
+        return False
+
+    auth_time = st.session_state.get("auth_time")
+    if not auth_time:
+        return False
+
+    if datetime.now() - auth_time > timedelta(hours=timeout_hours):
+        st.session_state.authenticated = False
+        st.session_state.username = None
+        st.session_state.auth_time = None
+        st.warning("Your session has expired. Please sign in again.")
+        return False
+
+    return True
+
+
+def show_login_form():
+    """Render the login form for the protected data-entry page."""
+    left, center, right = st.columns([1.25, 1.6, 1.25])
+    with center:
+        with st.container(border=True):
+            st.markdown("### Data Entry Login")
+            st.caption("Sign in to access protected data entry forms.")
+            with st.form("login_form", border=False):
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Login", use_container_width=True)
+
+    if submitted:
+        if authenticate_user(username, password):
+            st.session_state.authenticated = True
+            st.session_state.username = username.strip()
+            st.session_state.auth_time = datetime.now()
+            st.success("Login successful")
+            st.rerun()
+        else:
+            st.error("Invalid username or password")
 
 
 @st.cache_data
@@ -75,6 +142,10 @@ def load_data(file_obj, file_mtime=None):
     if "Quantity" in terminal.columns:
         terminal["Quantity"] = pd.to_numeric(terminal["Quantity"], errors="coerce")
 
+    for frame in (actual, resupply, terminal):
+        if "Company" in frame.columns:
+            frame["Company"] = frame["Company"].apply(_normalize_company_name)
+
     return xls.sheet_names, actual, resupply, terminal
 
 
@@ -85,7 +156,197 @@ def load_price_data(file_path, mtime=None):
     fp["Date"] = pd.to_datetime(fp["Date"], errors="coerce")
     fp["Price"] = pd.to_numeric(fp["Price"], errors="coerce")
     tr["Value"] = pd.to_numeric(tr["Value"], errors="coerce")
+
+    # Normalize tariff date for files that store Month/Year instead of Date.
+    if "Date" not in tr.columns:
+        if {"Year", "Month"}.issubset(tr.columns):
+            month_numbers = pd.to_datetime(tr["Month"], format="%b", errors="coerce").dt.month
+            if month_numbers.isna().all():
+                month_numbers = pd.to_datetime(tr["Month"], format="%B", errors="coerce").dt.month
+            year_start = tr["Year"].astype(str).str.extract(r"(\d{4})", expand=False)
+            tr["Date"] = pd.to_datetime(
+                year_start + "-" + month_numbers.fillna(1).astype(int).astype(str).str.zfill(2) + "-01",
+                errors="coerce",
+            )
+        elif "Month" in tr.columns:
+            tr["Date"] = pd.to_datetime(tr["Month"], errors="coerce")
+    else:
+        tr["Date"] = pd.to_datetime(tr["Date"], errors="coerce")
+
     return fp, tr
+
+
+def _company_from_filename(file_name):
+    name = file_name.lower()
+    if "totalenergies" in name:
+        return "TotalEnergies"
+    if "total energies" in name:
+        return "TotalEnergies"
+    if "pacific energy" in name:
+        return "Pacific Energy"
+    if "co-1" in name:
+        return "TotalEnergies"
+    if "co-2" in name:
+        return "Pacific Energy"
+    return Path(file_name).stem
+
+
+def _normalize_company_name(raw_company):
+    text = str(raw_company).strip()
+    normalized = text.lower().replace("-", " ")
+    normalized = " ".join(normalized.split())
+
+    if normalized in {"company 1", "co 1", "co1"}:
+        return "TotalEnergies"
+    if normalized in {"company 2", "co 2", "co2"}:
+        return "Pacific Energy"
+    if "totalenergies" in normalized or "total energies" in normalized:
+        return "TotalEnergies"
+    if "pacific energy" in normalized:
+        return "Pacific Energy"
+    return text
+
+
+def _company_allowed(company_name):
+    return str(company_name).strip() in {"TotalEnergies", "Pacific Energy"}
+
+
+def _location_from_sheet(sheet_name):
+    s = str(sheet_name).upper()
+    if "VAVA" in s:
+        return "Vava'u"
+    if "TONGATAPU" in s:
+        return "Tongatapu"
+    return str(sheet_name)
+
+
+def _normalize_fuel_name(raw_fuel):
+    text = str(raw_fuel).strip()
+    text = text.replace("(litres)", "").replace("(Litres)", "").strip()
+    if not text:
+        return "Unknown"
+    return text
+
+
+@st.cache_data
+def load_forecast_from_company_files(folder_path):
+    from openpyxl import load_workbook
+
+    records = []
+    folder = Path(folder_path)
+    if not folder.exists():
+        return pd.DataFrame(columns=["Date", "Company", "Location", "Fuel Type", "Forecast Delivery", "Forecast Closing", "Source"])
+
+    files = sorted([p for p in folder.glob("*.xlsx") if not p.name.startswith("~$")])
+    for file_path in files:
+        company = _company_from_filename(file_path.name)
+        try:
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+        except Exception:
+            continue
+
+        for ws in wb.worksheets:
+            location = _location_from_sheet(ws.title)
+
+            update_row = None
+            fuels = []
+            for r in range(1, min(ws.max_row, 40) + 1):
+                row_first_cell = str(ws.cell(r, 1).value or "").strip().lower()
+                if row_first_cell == "update as required":
+                    update_row = r
+                    for c in range(3, 10):
+                        fuel_val = ws.cell(r, c).value
+                        if fuel_val:
+                            fuels.append(_normalize_fuel_name(fuel_val))
+                    break
+
+            header_row = None
+            for r in range(1, min(ws.max_row, 40) + 1):
+                row_values = [str(ws.cell(r, c).value or "").lower() for c in range(1, min(ws.max_column, 80) + 1)]
+                if any("forecast delivery" in value for value in row_values):
+                    header_row = r
+                    break
+
+            if header_row is None:
+                continue
+
+            forecast_pairs = []
+            for c in range(1, min(ws.max_column, 120)):
+                left = str(ws.cell(header_row, c).value or "").strip().lower()
+                right = str(ws.cell(header_row, c + 1).value or "").strip().lower()
+                if "forecast delivery" in left and "closing stock" in right:
+                    forecast_pairs.append((c, c + 1))
+
+            if not forecast_pairs:
+                continue
+
+            date_col = None
+            if update_row is not None:
+                for c in range(1, min(ws.max_column, 30) + 1):
+                    if str(ws.cell(update_row, c).value or "").strip().lower() == "date":
+                        date_col = c
+                        break
+            if date_col is None:
+                date_col = 7
+
+            start_row = (update_row + 1) if update_row is not None else (header_row + 1)
+            end_row = min(ws.max_row, start_row + 450)
+
+            for r in range(start_row, end_row + 1):
+                raw_date = ws.cell(r, date_col).value
+                date_value = pd.to_datetime(raw_date, errors="coerce")
+                if pd.isna(date_value):
+                    continue
+
+                for i, (delivery_col, closing_col) in enumerate(forecast_pairs):
+                    fuel_name = fuels[i] if i < len(fuels) else f"Fuel {i + 1}"
+                    delivery = pd.to_numeric(ws.cell(r, delivery_col).value, errors="coerce")
+                    closing = pd.to_numeric(ws.cell(r, closing_col).value, errors="coerce")
+                    if pd.isna(delivery) and pd.isna(closing):
+                        continue
+                    records.append(
+                        {
+                            "Date": date_value,
+                            "Company": company,
+                            "Location": location,
+                            "Fuel Type": fuel_name,
+                            "Forecast Delivery": delivery,
+                            "Forecast Closing": closing,
+                            "Source": f"{file_path.name} | {ws.title}",
+                        }
+                    )
+
+    if not records:
+        return pd.DataFrame(columns=["Date", "Company", "Location", "Fuel Type", "Forecast Delivery", "Forecast Closing", "Source"])
+
+    forecast = pd.DataFrame(records)
+    forecast["Date"] = pd.to_datetime(forecast["Date"], errors="coerce")
+    if "Company" in forecast.columns:
+        forecast["Company"] = forecast["Company"].apply(_normalize_company_name)
+    forecast["Forecast Delivery"] = pd.to_numeric(forecast["Forecast Delivery"], errors="coerce")
+    forecast["Forecast Closing"] = pd.to_numeric(forecast["Forecast Closing"], errors="coerce")
+    forecast = forecast.dropna(subset=["Date"]).sort_values("Date")
+    return forecast
+
+
+@st.cache_data
+def load_manual_forecast_entries(file_path):
+    fp = Path(file_path)
+    if not fp.exists():
+        return pd.DataFrame(columns=["Date", "Company", "Location", "Fuel Type", "Forecast Delivery", "Forecast Closing", "Source"])
+
+    manual = pd.read_csv(fp)
+    if manual.empty:
+        return pd.DataFrame(columns=["Date", "Company", "Location", "Fuel Type", "Forecast Delivery", "Forecast Closing", "Source"])
+
+    manual["Date"] = pd.to_datetime(manual.get("Date"), errors="coerce")
+    if "Company" in manual.columns:
+        manual["Company"] = manual["Company"].apply(_normalize_company_name)
+    manual["Forecast Delivery"] = pd.to_numeric(manual.get("Forecast Delivery"), errors="coerce")
+    manual["Forecast Closing"] = pd.to_numeric(manual.get("Forecast Closing"), errors="coerce")
+    if "Source" not in manual.columns:
+        manual["Source"] = "Manual Entry"
+    return manual[["Date", "Company", "Location", "Fuel Type", "Forecast Delivery", "Forecast Closing", "Source"]]
 
 
 def calculate_kpis(actual_df, resupply_df):
@@ -389,6 +650,235 @@ def apply_chart_theme(fig, height=400, hovermode=None, x_title=None, y_title=Non
     )
     fig.update_traces(hoverlabel=dict(font=dict(color="#0B1220")))
     return fig
+
+
+def _to_normalized_day(value):
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.normalize()
+
+
+def _sheet_find_entry_row(
+    ws,
+    entry_date,
+    company,
+    location,
+    fuel_type,
+    date_col=1,
+    company_col=2,
+    location_col=3,
+    fuel_col=4,
+    start_row=2,
+):
+    """Find a row by Date+Company+Location+Fuel Type and return its row index."""
+    target_day = _to_normalized_day(entry_date)
+    if target_day is None:
+        return None
+
+    target_company = _normalize_company_name(company)
+    target_location = str(location).strip().lower()
+    target_fuel = str(fuel_type).strip().lower()
+
+    for row_idx in range(start_row, ws.max_row + 1):
+        existing_day = _to_normalized_day(ws.cell(row_idx, date_col).value)
+        if existing_day is None:
+            continue
+
+        existing_company = _normalize_company_name(ws.cell(row_idx, company_col).value)
+        existing_location = str(ws.cell(row_idx, location_col).value or "").strip().lower()
+        existing_fuel = str(ws.cell(row_idx, fuel_col).value or "").strip().lower()
+
+        if (
+            existing_day == target_day
+            and existing_company == target_company
+            and existing_location == target_location
+            and existing_fuel == target_fuel
+        ):
+            return row_idx
+
+    return None
+
+
+def save_actual_data(file_path, date, company, location, fuel_type, closing_stock, offtake, tonga_power_offtake=0, allow_update=False):
+    """Add a new row to the Actual sheet in the Excel workbook."""
+    try:
+        from openpyxl import load_workbook
+        
+        wb = load_workbook(file_path)
+        ws = wb["Actual"]
+
+        existing_row = _sheet_find_entry_row(ws, date, company, location, fuel_type)
+        if existing_row is not None:
+            if not allow_update:
+                return (
+                    False,
+                    f"Duplicate blocked: {company} already has an Actual entry for {pd.to_datetime(date).strftime('%Y-%m-%d')} at {location} ({fuel_type}). Enable update to edit it.",
+                )
+
+            ws[f"E{existing_row}"] = closing_stock
+            ws[f"F{existing_row}"] = offtake
+            ws[f"G{existing_row}"] = tonga_power_offtake
+            wb.save(file_path)
+            return True, "Existing stock entry updated successfully!"
+        
+        # Find the next empty row
+        next_row = ws.max_row + 1
+        
+        # Add data
+        ws[f"A{next_row}"] = date
+        ws[f"B{next_row}"] = company
+        ws[f"C{next_row}"] = location
+        ws[f"D{next_row}"] = fuel_type
+        ws[f"E{next_row}"] = closing_stock
+        ws[f"F{next_row}"] = offtake
+        ws[f"G{next_row}"] = tonga_power_offtake
+        
+        wb.save(file_path)
+        return True, "Stock data added successfully!"
+    except Exception as e:
+        return False, f"Error saving data: {str(e)}"
+
+
+def save_resupply_data(file_path, date, company, location, fuel_type, quantity, allow_update=False):
+    """Add a new row to the Resupply sheet in the Excel workbook."""
+    try:
+        from openpyxl import load_workbook
+        
+        wb = load_workbook(file_path)
+        ws = wb["Resupply"]
+
+        existing_row = _sheet_find_entry_row(ws, date, company, location, fuel_type)
+        if existing_row is not None:
+            if not allow_update:
+                return (
+                    False,
+                    f"Duplicate blocked: {company} already has a Resupply entry for {pd.to_datetime(date).strftime('%Y-%m-%d')} at {location} ({fuel_type}). Enable update to edit it.",
+                )
+
+            ws[f"E{existing_row}"] = quantity
+            wb.save(file_path)
+            return True, "Existing resupply entry updated successfully!"
+        
+        # Find the next empty row
+        next_row = ws.max_row + 1
+        
+        # Add data
+        ws[f"A{next_row}"] = date
+        ws[f"B{next_row}"] = company
+        ws[f"C{next_row}"] = location
+        ws[f"D{next_row}"] = fuel_type
+        ws[f"E{next_row}"] = quantity
+        
+        wb.save(file_path)
+        return True, "Resupply data added successfully!"
+    except Exception as e:
+        return False, f"Error saving data: {str(e)}"
+
+
+def save_fuel_price(file_path, date, fuel_type, price_type, price):
+    """Add a new row to the FuelPrice_Long sheet in the price workbook."""
+    try:
+        from openpyxl import load_workbook
+        
+        wb = load_workbook(file_path)
+        ws = wb["FuelPrice_Long"]
+        
+        # Find the next empty row
+        next_row = ws.max_row + 1
+        
+        # Add data
+        ws[f"A{next_row}"] = date
+        ws[f"B{next_row}"] = fuel_type
+        ws[f"C{next_row}"] = price_type
+        ws[f"D{next_row}"] = price
+        
+        wb.save(file_path)
+        return True, "Fuel price added successfully!"
+    except Exception as e:
+        return False, f"Error saving price data: {str(e)}"
+
+
+def save_tariff(file_path, date, component, period, value):
+    """Add a new row to the Tariff_Long sheet in the price workbook."""
+    try:
+        from openpyxl import load_workbook
+        
+        wb = load_workbook(file_path)
+        ws = wb["Tariff_Long"]
+        
+        # Find the next empty row
+        next_row = ws.max_row + 1
+        
+        # Add data
+        ws[f"A{next_row}"] = date
+        ws[f"B{next_row}"] = component
+        ws[f"C{next_row}"] = period
+        ws[f"D{next_row}"] = value
+        
+        wb.save(file_path)
+        return True, "Tariff data added successfully!"
+    except Exception as e:
+        return False, f"Error saving tariff data: {str(e)}"
+
+
+def save_forecast_entry(file_path, date, company, location, fuel_type, forecast_delivery, forecast_closing, allow_update=False):
+    """Append a forecast record to a CSV file."""
+    try:
+        record = pd.DataFrame(
+            [
+                {
+                    "Date": pd.to_datetime(date).strftime("%Y-%m-%d"),
+                    "Company": _normalize_company_name(company),
+                    "Location": location,
+                    "Fuel Type": fuel_type,
+                    "Forecast Delivery": forecast_delivery,
+                    "Forecast Closing": forecast_closing,
+                    "Source": "Manual Entry",
+                }
+            ]
+        )
+
+        fp = Path(file_path)
+        if fp.exists():
+            existing = pd.read_csv(fp)
+            if not existing.empty and {"Date", "Company", "Location", "Fuel Type"}.issubset(existing.columns):
+                existing_days = pd.to_datetime(existing["Date"], errors="coerce").dt.normalize()
+                existing_companies = existing["Company"].apply(_normalize_company_name)
+                existing_locations = existing["Location"].astype(str).str.strip().str.lower()
+                existing_fuels = existing["Fuel Type"].astype(str).str.strip().str.lower()
+                target_day = _to_normalized_day(date)
+                target_company = _normalize_company_name(company)
+                target_location = str(location).strip().lower()
+                target_fuel = str(fuel_type).strip().lower()
+
+                duplicate_mask = (
+                    (existing_days == target_day)
+                    & (existing_companies == target_company)
+                    & (existing_locations == target_location)
+                    & (existing_fuels == target_fuel)
+                )
+                if target_day is not None and duplicate_mask.any():
+                    if not allow_update:
+                        return (
+                            False,
+                            f"Duplicate blocked: {target_company} already has a Forecast entry for {target_day.strftime('%Y-%m-%d')} at {location} ({fuel_type}). Enable update to edit it.",
+                        )
+
+                    update_idx = existing.index[duplicate_mask][0]
+                    existing.loc[update_idx, "Forecast Delivery"] = forecast_delivery
+                    existing.loc[update_idx, "Forecast Closing"] = forecast_closing
+                    existing.loc[update_idx, "Source"] = "Manual Entry"
+                    existing.to_csv(fp, index=False)
+                    return True, "Existing forecast entry updated successfully!"
+            updated = pd.concat([existing, record], ignore_index=True)
+        else:
+            updated = record
+
+        updated.to_csv(fp, index=False)
+        return True, "Forecast entry added successfully!"
+    except Exception as e:
+        return False, f"Error saving forecast data: {str(e)}"
 
 
 set_app_background(BACKGROUND_FILE)
@@ -932,6 +1422,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Initialize authentication session state
+init_session_state()
+
 file_to_use = DEFAULT_FILE
 
 if not DEFAULT_FILE.exists():
@@ -954,21 +1447,53 @@ if PRICE_FILE.exists():
     except Exception:
         pass
 
+forecast_df_auto = load_forecast_from_company_files(str(FUEL_COMPANY_DIR))
+forecast_df_manual = load_manual_forecast_entries(str(FORECAST_ENTRY_FILE))
+forecast_df = pd.concat([forecast_df_auto, forecast_df_manual], ignore_index=True)
+if not forecast_df.empty:
+    forecast_df["Date"] = pd.to_datetime(forecast_df["Date"], errors="coerce")
+    forecast_df["Forecast Delivery"] = pd.to_numeric(forecast_df["Forecast Delivery"], errors="coerce")
+    forecast_df["Forecast Closing"] = pd.to_numeric(forecast_df["Forecast Closing"], errors="coerce")
+    forecast_df = forecast_df.dropna(subset=["Date"]).sort_values("Date")
+
 # Sidebar filters
 st.sidebar.title("🎛️ Filters")
 
-_SECTIONS = ["📊 Fuel Supply", "📦 Terminal Data", "💰 Prices & Tariffs"]
+# Show user info and logout button if authenticated
+if st.session_state.authenticated:
+    logout_col1, logout_col2 = st.sidebar.columns([2, 1])
+    with logout_col1:
+        st.caption(f"👤 {st.session_state.username}")
+    with logout_col2:
+        if st.button("🔓 Logout", key="sidebar_logout", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.username = None
+            st.session_state.auth_time = None
+            st.rerun()
+    st.sidebar.divider()
+
+_SECTIONS = ["📊 Fuel Supply", "📦 Terminal Data", "💰 Prices & Tariffs", "✏️ Data Entry"]
 active_section = st.sidebar.radio("Section", _SECTIONS, key="active_section", label_visibility="collapsed")
 st.sidebar.divider()
 
-companies = sorted([x for x in actual_df["Company"].dropna().unique()])
-locations = sorted([x for x in actual_df["Location"].dropna().unique()])
-fuels = sorted([x for x in actual_df["Fuel Type"].dropna().unique()])
-months = (
-    sorted(actual_df["Date"].dropna().dt.to_period("M").astype(str).unique())
-    if "Date" in actual_df.columns
-    else []
-)
+actual_companies = set(actual_df["Company"].dropna().astype(str).unique()) if "Company" in actual_df.columns else set()
+forecast_companies = set(forecast_df["Company"].dropna().astype(str).unique()) if not forecast_df.empty else set()
+companies = [company for company in sorted(actual_companies | forecast_companies) if _company_allowed(company)]
+
+actual_locations = set(actual_df["Location"].dropna().astype(str).unique()) if "Location" in actual_df.columns else set()
+forecast_locations = set(forecast_df["Location"].dropna().astype(str).unique()) if not forecast_df.empty else set()
+locations = sorted(actual_locations | forecast_locations)
+
+actual_fuels = set(actual_df["Fuel Type"].dropna().astype(str).unique()) if "Fuel Type" in actual_df.columns else set()
+forecast_fuels = set(forecast_df["Fuel Type"].dropna().astype(str).unique()) if not forecast_df.empty else set()
+fuels = sorted(actual_fuels | forecast_fuels)
+
+month_values = []
+if "Date" in actual_df.columns:
+    month_values.extend(actual_df["Date"].dropna().dt.to_period("M").astype(str).unique().tolist())
+if not forecast_df.empty:
+    month_values.extend(forecast_df["Date"].dropna().dt.to_period("M").astype(str).unique().tolist())
+months = sorted(set(month_values))
 
 if active_section != "💰 Prices & Tariffs":
     company_filter_box = st.sidebar.container(border=True, key="filter_company_group")
@@ -1017,6 +1542,18 @@ filtered_resupply = resupply_df_for_filter[
     & resupply_df_for_filter["Fuel Type"].isin(fuel_sel)
     & resupply_df_for_filter["Month"].isin(month_sel)
 ].copy()
+
+forecast_df_for_filter = forecast_df.copy()
+if not forecast_df_for_filter.empty:
+    forecast_df_for_filter["Month"] = forecast_df_for_filter["Date"].dt.to_period("M").astype(str)
+    filtered_forecast = forecast_df_for_filter[
+        forecast_df_for_filter["Company"].isin(company_sel)
+        & forecast_df_for_filter["Location"].isin(location_sel)
+        & forecast_df_for_filter["Fuel Type"].isin(fuel_sel)
+        & forecast_df_for_filter["Month"].isin(month_sel)
+    ].copy()
+else:
+    filtered_forecast = forecast_df_for_filter
 
 # Display KPIs
 st.subheader("Key Performance Indicators")
@@ -1227,7 +1764,7 @@ if active_section == "📊 Fuel Supply":
             fig_stock.update_layout(title_text="")
             with st.container(border=True, key="chart_stock"):
                 render_chart_title(st, "Stock Level Over Time by Fuel Type")
-                st.plotly_chart(fig_stock, width='stretch')
+                st.plotly_chart(fig_stock, use_container_width=True)
         else:
             st.info("No stock data available")
     
@@ -1276,7 +1813,7 @@ if active_section == "📊 Fuel Supply":
             fig_offtake.update_layout(title_text="")
             with st.container(border=True, key="chart_offtake"):
                 render_chart_title(st, "Daily Offtake (Take-off) by Fuel Type")
-                st.plotly_chart(fig_offtake, width='stretch')
+                st.plotly_chart(fig_offtake, use_container_width=True)
         else:
             st.info("No offtake data available")
     
@@ -1306,7 +1843,7 @@ if active_section == "📊 Fuel Supply":
             fig_loc.update_layout(title_text="")
             with st.container(border=True, key="chart_location"):
                 render_chart_title(st, "Current Stock by Location")
-                st.plotly_chart(fig_loc, width='stretch')
+                st.plotly_chart(fig_loc, use_container_width=True)
         else:
             st.info("No location data available")
     
@@ -1328,7 +1865,7 @@ if active_section == "📊 Fuel Supply":
             fig_resupply.update_layout(title_text="")
             with st.container(border=True, key="chart_resupply"):
                 render_chart_title(st, "Scheduled Resupply by Date")
-                st.plotly_chart(fig_resupply, width='stretch')
+                st.plotly_chart(fig_resupply, use_container_width=True)
         else:
             st.info("No resupply data scheduled")
 
@@ -1369,7 +1906,7 @@ elif active_section == "📦 Terminal Data":
         fig_terminal.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
         with st.container(border=True, key="chart_terminal"):
             render_chart_title(st, "Terminal Capacities by Location and Type")
-            st.plotly_chart(fig_terminal, width='stretch')
+            st.plotly_chart(fig_terminal, use_container_width=True)
     else:
         st.info("No terminal data available")
 
@@ -1459,7 +1996,7 @@ elif active_section == "📦 Terminal Data":
 
         with st.container(border=True, key="chart_battery_stock_capacity"):
             render_chart_title(st, "Terminal Fill Level by Company")
-            st.plotly_chart(fig_battery, width="stretch")
+            st.plotly_chart(fig_battery, use_container_width=True)
     else:
         st.info("No company data available for stock vs capacity comparison")
 
@@ -1548,7 +2085,7 @@ elif active_section == "📦 Terminal Data":
 
         with st.container(border=True, key="chart_battery_stock_capacity_location"):
             render_chart_title(st, "Terminal Fill Level by Location")
-            st.plotly_chart(fig_battery_location, width="stretch")
+            st.plotly_chart(fig_battery_location, use_container_width=True)
     else:
         st.info("No location data available for stock vs capacity comparison")
 
@@ -1633,7 +2170,7 @@ elif active_section == "💰 Prices & Tariffs":
             fig_fp.update_layout(title_text="")
             with st.container(border=True, key="chart_fuel_price"):
                 render_chart_title(st, "Fuel Price Trends Over Time")
-                st.plotly_chart(fig_fp, width="stretch")
+                st.plotly_chart(fig_fp, use_container_width=True)
         else:
             st.info("No fuel price data matches the selected filters")
 
@@ -1725,7 +2262,7 @@ elif active_section == "💰 Prices & Tariffs":
             fig_tr.update_layout(title_text="")
             with st.container(border=True, key="chart_tariff"):
                 render_chart_title(st, "Electricity Tariff Components Over Time")
-                st.plotly_chart(fig_tr, width="stretch")
+                st.plotly_chart(fig_tr, use_container_width=True)
         else:
             st.info("No tariff data matches the selected filters")
 
@@ -1790,10 +2327,575 @@ elif active_section == "💰 Prices & Tariffs":
             with st.container(border=True, key="chart_dependency"):
                 render_chart_title(st, "Fuel Price vs Tariff Dependence Heatmap")
                 st.caption("Correlation across overlapping monthly periods. Values closer to 1 move together more strongly; values near -1 move in opposite directions.")
-                st.plotly_chart(fig_dependency, width="stretch")
+                st.plotly_chart(fig_dependency, use_container_width=True)
         else:
             st.info("Not enough overlapping monthly data to calculate a dependency heatmap")
 
+elif active_section == "🔮 Forecast":
+    st.subheader("Fuel Forecast")
+    st.caption("Forecast delivery and projected closing stock from Fuel Company reports and manual entries.")
+
+    if filtered_forecast.empty:
+        st.info("No forecast data available for the selected filters")
+    else:
+        upcoming_30 = filtered_forecast[
+            (filtered_forecast["Date"] >= pd.Timestamp.now().normalize())
+            & (filtered_forecast["Date"] <= pd.Timestamp.now().normalize() + pd.Timedelta(days=30))
+        ]
+        total_forecast_delivery = upcoming_30["Forecast Delivery"].fillna(0).sum()
+
+        latest_forecast = (
+            filtered_forecast.dropna(subset=["Date", "Forecast Closing"])
+            .sort_values("Date")
+            .drop_duplicates(subset=["Company", "Location", "Fuel Type"], keep="last")
+        )
+        projected_closing_total = latest_forecast["Forecast Closing"].fillna(0).sum()
+
+        kpi_col1, kpi_col2 = st.columns(2)
+        render_kpi_group(
+            kpi_col1,
+            "Forecast Delivery (Next 30 Days)",
+            [("📦", "Total Delivery", f"{format_compact(total_forecast_delivery)}", "#34D399")],
+        )
+        render_kpi_group(
+            kpi_col2,
+            "Latest Projected Closing",
+            [("🔮", "Projected Stock", f"{format_compact(projected_closing_total)}", "#60A5FA")],
+        )
+
+        st.markdown("<div style='height: 0.3rem;'></div>", unsafe_allow_html=True)
+
+        chart_col1, chart_col2 = st.columns(2)
+
+        with chart_col1:
+            delivery_series = filtered_forecast.dropna(subset=["Date", "Forecast Delivery"])
+            if not delivery_series.empty:
+                forecast_delivery_by_date = (
+                    delivery_series.groupby(["Date", "Fuel Type"], as_index=False)["Forecast Delivery"].sum()
+                )
+                fig_forecast_delivery = px.bar(
+                    forecast_delivery_by_date,
+                    x="Date",
+                    y="Forecast Delivery",
+                    color="Fuel Type",
+                    barmode="stack",
+                    color_discrete_sequence=CHART_COLORS,
+                )
+                apply_chart_theme(
+                    fig_forecast_delivery,
+                    height=400,
+                    x_title="Date",
+                    y_title="Forecast Delivery (L)",
+                    date_x=True,
+                )
+                fig_forecast_delivery.update_layout(title_text="")
+                with st.container(border=True, key="chart_forecast_delivery"):
+                    render_chart_title(st, "Forecast Delivery by Date")
+                    st.plotly_chart(fig_forecast_delivery, use_container_width=True)
+            else:
+                st.info("No forecast delivery values available")
+
+        with chart_col2:
+            closing_series = filtered_forecast.dropna(subset=["Date", "Forecast Closing"])
+            if not closing_series.empty:
+                forecast_closing_by_date = (
+                    closing_series.groupby(["Date", "Fuel Type"], as_index=False)["Forecast Closing"].mean()
+                )
+                fig_forecast_closing = px.line(
+                    forecast_closing_by_date,
+                    x="Date",
+                    y="Forecast Closing",
+                    color="Fuel Type",
+                    markers=True,
+                    color_discrete_sequence=CHART_COLORS,
+                )
+                apply_chart_theme(
+                    fig_forecast_closing,
+                    height=400,
+                    hovermode="x unified",
+                    x_title="Date",
+                    y_title="Projected Closing Stock (L)",
+                    date_x=True,
+                )
+                fig_forecast_closing.update_layout(title_text="")
+                with st.container(border=True, key="chart_forecast_closing"):
+                    render_chart_title(st, "Projected Closing Stock Trend")
+                    st.plotly_chart(fig_forecast_closing, use_container_width=True)
+            else:
+                st.info("No projected closing values available")
+
+        st.divider()
+        st.markdown("### Forecast Detail")
+        forecast_detail = filtered_forecast.sort_values("Date", ascending=False)[
+            ["Date", "Company", "Location", "Fuel Type", "Forecast Delivery", "Forecast Closing", "Source"]
+        ]
+        st.dataframe(forecast_detail.head(50), use_container_width=True, hide_index=True)
+
+elif active_section == "✏️ Data Entry":
+    # Check if user is authenticated and session is valid
+    if not check_session_timeout():
+        show_login_form()
+    else:
+        st.subheader("Add New Fuel Data")
+        st.caption(f"Logged in as: **{st.session_state.username}** | [Logout](#logout)")
+        
+        # Initialize session state for forms
+        if "entry_mode" not in st.session_state:
+            st.session_state.entry_mode = "Actual Stock"
+        
+        # Tab selection for entry type
+        entry_tabs = st.tabs(["📥 Actual Stock", "📦 Resupply Schedule", "💵 Fuel Prices", "🔮 Forecast", "🎯 Tariffs"])
+
+        # Persistent fuel type selection for all forms
+        all_fuels = sorted(actual_df["Fuel Type"].dropna().unique())
+        if "selected_fuel_type" not in st.session_state:
+            st.session_state.selected_fuel_type = all_fuels[0] if all_fuels else ""
+        
+        with entry_tabs[0]:
+            st.markdown("### Record Daily Fuel Stock")
+            st.caption("Add a new daily stock entry for a fuel company location.")
+            # Show most recent entry from this session (handle both single and multiple rows)
+            if "last_actual_entry" in st.session_state:
+                last_entry = st.session_state["last_actual_entry"]
+                if isinstance(last_entry, list):
+                    df_last = pd.DataFrame(last_entry)
+                else:
+                    df_last = pd.DataFrame([last_entry])
+                st.info("Most recent entry:")
+                st.dataframe(df_last, use_container_width=True, hide_index=True)
+
+            with st.form("actual_stock_form", border=True):
+                left, right = st.columns([1.2, 2.2])
+                with left:
+                    entry_date = st.date_input("Stock Date", key="actual_date")
+                    entry_company = st.selectbox(
+                        "Company",
+                        options=sorted(actual_df["Company"].dropna().unique()),
+                        key="actual_company"
+                    )
+                    entry_location = st.selectbox(
+                        "Location",
+                        options=sorted(actual_df["Location"].dropna().unique()),
+                        key="actual_location"
+                    )
+                    update_existing_actual = st.checkbox(
+                        "Update existing row if same Date + Company + Location + Fuel Type exists",
+                        value=True,
+                        key="actual_update_existing",
+                    )
+                with right:
+                    st.markdown("#### Enter Stock and Offtake for Each Fuel Type")
+                    with st.container(border=True):
+                        st.markdown("<style>div[data-testid='column'] label {font-weight: 500;}</style>", unsafe_allow_html=True)
+                        # Add header row for labels
+                        header_cols = st.columns([1.2, 1.2, 1.2])
+                        header_cols[0].markdown("<span style='font-weight:600'></span>", unsafe_allow_html=True)
+                        header_cols[1].markdown("<span style='font-weight:600'>Closing Stock (L)</span>", unsafe_allow_html=True)
+                        header_cols[2].markdown("<span style='font-weight:600'>Offtake (L)</span>", unsafe_allow_html=True)
+                        fuel_rows = [
+                            ("Petrol", "actual_petrol_closing", "actual_petrol_offtake", "actual_petrol_tonga"),
+                            ("Diesel", "actual_diesel_closing", "actual_diesel_offtake", "actual_diesel_tonga"),
+                            ("Kerosene", "actual_kerosene_closing", "actual_kerosene_offtake", "actual_kerosene_tonga"),
+                        ]
+                        fuel_entries = []
+                        for fuel, closing_key, offtake_key, tonga_key in fuel_rows:
+                            cols = st.columns([1.2, 1.2, 1.2])
+                            cols[0].markdown(f"<span style='font-weight:600'>{fuel}</span>", unsafe_allow_html=True)
+                            closing = cols[1].number_input(f"Closing Stock (L) [{fuel}]", min_value=0, value=0, key=closing_key, label_visibility="collapsed")
+                            offtake = cols[2].number_input(f"Offtake (L) [{fuel}]", min_value=0, value=0, key=offtake_key, label_visibility="collapsed")
+                            tonga = None
+                            # Only show Tonga Power Offtake for TotalEnergies
+                            if fuel == "Diesel" and entry_company.strip().lower().replace(" ","") in ["totalenergies","totalenergiesmarketing"]:
+                                tonga = st.number_input(f"Tonga Power Offtake (L) [{fuel}]", min_value=0, value=0, key=tonga_key)
+                            fuel_entries.append({
+                                "Fuel Type": fuel,
+                                "Closing Stock": closing,
+                                "Offtake": offtake,
+                                "Tonga Power Offtake": tonga if tonga is not None else 0,
+                            })
+                    submitted = st.form_submit_button("➕ Add Stock Entry", use_container_width=True)
+
+                if submitted:
+                    # Save each fuel row as a separate entry
+                    last_entries = []
+                    for entry in fuel_entries:
+                        # Only save if at least one value is entered
+                        if entry["Closing Stock"] > 0 or entry["Offtake"] > 0 or (entry["Tonga Power Offtake"] and entry["Tonga Power Offtake"] > 0):
+                            success, message = save_actual_data(
+                                str(file_to_use),
+                                entry_date,
+                                entry_company,
+                                entry_location,
+                                entry["Fuel Type"],
+                                entry["Closing Stock"],
+                                entry["Offtake"],
+                                entry["Tonga Power Offtake"],
+                                allow_update=update_existing_actual,
+                            )
+                            last_entries.append({
+                                "Date": entry_date,
+                                "Company": entry_company,
+                                "Location": entry_location,
+                                "Fuel Type": entry["Fuel Type"],
+                                "Closing Stock": entry["Closing Stock"],
+                                "Offtake": entry["Offtake"],
+                                "Tonga Power Offtake": entry["Tonga Power Offtake"],
+                                "Status": "Success" if success else "Failed",
+                                "Message": message,
+                            })
+                    if last_entries:
+                        st.session_state["last_actual_entry"] = last_entries
+                        st.success("Entries saved. See most recent above.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.warning("No values entered for any fuel type.")
+        
+        with entry_tabs[1]:
+            st.markdown("### Schedule Fuel Resupply")
+            st.caption("Add a new scheduled resupply event for a fuel company location.")
+            if "last_resupply_entry" in st.session_state:
+                st.info("Most recent entry:")
+                st.dataframe(pd.DataFrame([st.session_state["last_resupply_entry"]]), use_container_width=True, hide_index=True)
+            
+            with st.form("resupply_form", border=True):
+                left, right = st.columns([1.2, 2.2])
+                with left:
+                    resupply_date = st.date_input("Resupply Date", key="resupply_date")
+                    resupply_company = st.selectbox(
+                        "Company",
+                        options=sorted(actual_df["Company"].dropna().unique()),
+                        key="resupply_company"
+                    )
+                    resupply_location = st.selectbox(
+                        "Location",
+                        options=sorted(actual_df["Location"].dropna().unique()),
+                        key="resupply_location"
+                    )
+                    update_existing_resupply = st.checkbox(
+                        "Update existing row if same Date + Company + Location + Fuel Type exists",
+                        value=True,
+                        key="resupply_update_existing",
+                    )
+                with right:
+                    st.markdown("#### Enter Resupply Quantity for Each Fuel Type")
+                    with st.container(border=True):
+                        st.markdown("<style>div[data-testid='column'] label {font-weight: 500;}</style>", unsafe_allow_html=True)
+                        resupply_fuel_rows = [
+                            ("Petrol", "resupply_petrol_quantity"),
+                            ("Diesel", "resupply_diesel_quantity"),
+                            ("Kerosene", "resupply_kerosene_quantity"),
+                        ]
+                        resupply_entries = []
+                        for fuel, quantity_key in resupply_fuel_rows:
+                            cols = st.columns([1.2, 2])
+                            cols[0].markdown(f"<span style='font-weight:600'>{fuel}</span>", unsafe_allow_html=True)
+                            quantity = cols[1].number_input(f"Quantity (L) [{fuel}]", min_value=0, value=0, key=quantity_key, label_visibility="collapsed")
+                            resupply_entries.append({
+                                "Fuel Type": fuel,
+                                "Quantity": quantity,
+                            })
+                    submitted_resupply = st.form_submit_button("➕ Add Resupply Entry", use_container_width=True)
+
+                if submitted_resupply:
+                    last_resupply_entries = []
+                    for entry in resupply_entries:
+                        if entry["Quantity"] > 0:
+                            success, message = save_resupply_data(
+                                str(file_to_use),
+                                resupply_date,
+                                resupply_company,
+                                resupply_location,
+                                entry["Fuel Type"],
+                                entry["Quantity"],
+                                allow_update=update_existing_resupply,
+                            )
+                            last_resupply_entries.append({
+                                "Date": resupply_date,
+                                "Company": resupply_company,
+                                "Location": resupply_location,
+                                "Fuel Type": entry["Fuel Type"],
+                                "Quantity": entry["Quantity"],
+                            })
+                    if last_resupply_entries:
+                        st.session_state["last_resupply_entry"] = last_resupply_entries
+                        st.success("Entries saved. See most recent above.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.warning("No values entered for any fuel type.")
+                
+                if submitted_resupply:
+                    success, message = save_resupply_data(
+                        str(file_to_use),
+                        resupply_date,
+                        resupply_company,
+                        resupply_location,
+                        resupply_fuel,
+                        resupply_quantity,
+                        allow_update=update_existing_resupply,
+                    )
+                    st.session_state["last_resupply_entry"] = {
+                        "Date": resupply_date,
+                        "Company": resupply_company,
+                        "Location": resupply_location,
+                        "Fuel Type": resupply_fuel,
+                        "Quantity": resupply_quantity,
+                    }
+                    if success:
+                        st.success(message)
+                        st.info("💡 The dashboard will automatically reload with the new data on your next view refresh.")
+                    else:
+                        st.error(message)
+        
+        with entry_tabs[2]:
+            st.markdown("### Record Fuel Price")
+            st.caption("Add a new fuel price entry for tracking price trends.")
+            
+            with st.form("fuel_price_form", border=True):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    price_date = st.date_input("Price Date", key="price_date")
+                
+                with col2:
+                    price_fuel = st.selectbox(
+                        "Fuel Type",
+                        options=["Petrol", "Diesel", "Heavy Fuel Oil"],
+                        key="price_fuel"
+                    )
+                
+                with col3:
+                    price_type_sel = st.selectbox(
+                        "Price Type",
+                        options=["Wholesale", "Retail", "Import"],
+                        key="price_type_sel"
+                    )
+                
+                col4, col5 = st.columns(2)
+                
+                with col4:
+                    price_value = st.number_input(
+                        "Price (per Liter)",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.01,
+                        key="price_value"
+                    )
+                
+                with col5:
+                    price_currency = st.selectbox(
+                        "Currency",
+                        options=["TOP", "USD", "AUD"],
+                        key="price_currency"
+                    )
+                
+                submitted_price = st.form_submit_button("➕ Add Fuel Price", use_container_width=True)
+                
+                if submitted_price:
+                    if PRICE_FILE.exists():
+                        success, message = save_fuel_price(
+                            str(PRICE_FILE),
+                            price_date,
+                            price_fuel,
+                            price_type_sel,
+                            price_value
+                        )
+                        if success:
+                            st.success(message)
+                            st.info("💡 The dashboard will automatically reload with the new data on your next view refresh.")
+                        else:
+                            st.error(message)
+                    else:
+                        st.error("Price data file not found. Please check the system configuration.")
+        
+        with entry_tabs[3]:
+            st.markdown("### Record Forecast")
+            st.caption("Add a manual forecast delivery/closing entry.")
+            if "last_forecast_entry" in st.session_state:
+                st.info("Most recent entry:")
+                st.dataframe(pd.DataFrame([st.session_state["last_forecast_entry"]]), use_container_width=True, hide_index=True)
+
+            with st.form("forecast_form", border=True):
+                left, right = st.columns([1.2, 2.2])
+                with left:
+                    forecast_date = st.date_input("Forecast Date", key="forecast_date")
+                    forecast_company = st.selectbox(
+                        "Company",
+                        options=companies if companies else sorted(actual_df["Company"].dropna().unique()),
+                        key="forecast_company"
+                    )
+                    forecast_location = st.selectbox(
+                        "Location",
+                        options=locations if locations else sorted(actual_df["Location"].dropna().unique()),
+                        key="forecast_location"
+                    )
+                    update_existing_forecast = st.checkbox(
+                        "Update existing row if same Date + Company + Location + Fuel Type exists",
+                        value=True,
+                        key="forecast_update_existing",
+                    )
+                with right:
+                    st.markdown("#### Enter Forecast Delivery and Closing for Each Fuel Type")
+                    with st.container(border=True):
+                        st.markdown("<style>div[data-testid='column'] label {font-weight: 500;}</style>", unsafe_allow_html=True)
+                        forecast_fuel_rows = [
+                            ("Petrol", "forecast_petrol_delivery", "forecast_petrol_closing"),
+                            ("Diesel", "forecast_diesel_delivery", "forecast_diesel_closing"),
+                            ("Kerosene", "forecast_kerosene_delivery", "forecast_kerosene_closing"),
+                        ]
+                        forecast_entries = []
+                        for fuel, delivery_key, closing_key in forecast_fuel_rows:
+                            cols = st.columns([1.2, 1.2, 1.2])
+                            cols[0].markdown(f"<span style='font-weight:600'>{fuel}</span>", unsafe_allow_html=True)
+                            delivery = cols[1].number_input(f"Forecast Delivery (L) [{fuel}]", min_value=0.0, value=0.0, step=1.0, key=delivery_key, label_visibility="collapsed")
+                            closing = cols[2].number_input(f"Forecast Closing (L) [{fuel}]", min_value=0.0, value=0.0, step=1.0, key=closing_key, label_visibility="collapsed")
+                            forecast_entries.append({
+                                "Fuel Type": fuel,
+                                "Forecast Delivery": delivery,
+                                "Forecast Closing": closing,
+                            })
+                    submitted_forecast = st.form_submit_button("➕ Add Forecast Entry", use_container_width=True)
+
+                if submitted_forecast:
+                    last_forecast_entries = []
+                    for entry in forecast_entries:
+                        if entry["Forecast Delivery"] > 0 or entry["Forecast Closing"] > 0:
+                            success, message = save_forecast_entry(
+                                str(FORECAST_ENTRY_FILE),
+                                forecast_date,
+                                forecast_company,
+                                forecast_location,
+                                entry["Fuel Type"],
+                                entry["Forecast Delivery"],
+                                entry["Forecast Closing"],
+                                allow_update=update_existing_forecast,
+                            )
+                            last_forecast_entries.append({
+                                "Date": forecast_date,
+                                "Company": forecast_company,
+                                "Location": forecast_location,
+                                "Fuel Type": entry["Fuel Type"],
+                                "Forecast Delivery": entry["Forecast Delivery"],
+                                "Forecast Closing": entry["Forecast Closing"],
+                            })
+                    if last_forecast_entries:
+                        st.session_state["last_forecast_entry"] = last_forecast_entries
+                        st.success("Entries saved. See most recent above.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.warning("No values entered for any fuel type.")
+
+        with entry_tabs[4]:
+            st.markdown("### Record Tariff")
+            st.caption("Add a new tariff component entry for tracking tariff changes.")
+            
+            with st.form("tariff_form", border=True):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    tariff_date = st.date_input("Tariff Date", key="tariff_date")
+                
+                with col2:
+                    tariff_component = st.selectbox(
+                        "Tariff Component",
+                        options=["Base Rate", "Excise Tax", "Distribution Cost", "Administration Fee", "Environmental Levy"],
+                        key="tariff_component"
+                    )
+                
+                with col3:
+                    tariff_period = st.selectbox(
+                        "Period",
+                        options=["Monthly", "Quarterly", "Annual"],
+                        key="tariff_period"
+                    )
+                
+                col4, col5 = st.columns(2)
+                
+                with col4:
+                    tariff_value = st.number_input(
+                        "Tariff Value",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.01,
+                        key="tariff_value"
+                    )
+                
+                with col5:
+                    tariff_unit = st.selectbox(
+                        "Unit",
+                        options=["TOP/L", "TOP/Unit", "Percentage"],
+                        key="tariff_unit"
+                    )
+                
+                submitted_tariff = st.form_submit_button("➕ Add Tariff Entry", use_container_width=True)
+                
+                if submitted_tariff:
+                    if PRICE_FILE.exists():
+                        success, message = save_tariff(
+                            str(PRICE_FILE),
+                            tariff_date,
+                            tariff_component,
+                            tariff_period,
+                            tariff_value
+                        )
+                        if success:
+                            st.success(message)
+                            st.info("💡 The dashboard will automatically reload with the new data on your next view refresh.")
+                        else:
+                            st.error(message)
+                    else:
+                        st.error("Price data file not found. Please check the system configuration.")
+        
+        st.divider()
+        st.markdown("### Recent Data Entries")
+        st.caption("Latest entries for all data types currently in the system.")
+        
+        tab_recent1, tab_recent2, tab_recent3, tab_recent4, tab_recent5 = st.tabs(["Recent Actual Stock", "Recent Resupply", "Recent Fuel Prices", "Recent Forecast", "Recent Tariffs"])
+        
+        with tab_recent1:
+            try:
+                if not actual_df.empty:
+                    display_cols = [c for c in ["Date", "Company", "Location", "Fuel Type", "Closing Stock", "Offtake"] if c in actual_df.columns]
+                    recent_actual = actual_df.nlargest(10, "Date")[display_cols]
+                    st.dataframe(recent_actual, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No actual stock data available")
+            except Exception as e:
+                st.error(f"Error displaying recent actual stock: {e}")
+        
+        with tab_recent2:
+            recent_resupply = resupply_df.nlargest(10, "Date")[["Date", "Company", "Location", "Fuel Type", "Quantity"]]
+            st.dataframe(recent_resupply, use_container_width=True, hide_index=True)
+        
+        with tab_recent3:
+            if price_df is not None and not price_df.empty:
+                recent_prices = price_df.nlargest(10, "Date")[["Date", "Fuel", "Price_Type", "Price"]]
+                st.dataframe(recent_prices, use_container_width=True, hide_index=True)
+            else:
+                st.info("No fuel price data available")
+        
+        with tab_recent4:
+            if not forecast_df.empty:
+                recent_forecast = forecast_df.nlargest(10, "Date")[["Date", "Company", "Location", "Fuel Type", "Forecast Delivery", "Forecast Closing", "Source"]]
+                st.dataframe(recent_forecast, use_container_width=True, hide_index=True)
+            else:
+                st.info("No forecast data available")
+
+        with tab_recent5:
+            if tariff_df is not None and not tariff_df.empty:
+                tariff_recent = tariff_df.copy()
+                if "Date" in tariff_recent.columns:
+                    tariff_recent = tariff_recent.sort_values("Date", ascending=False)
+                elif "Year" in tariff_recent.columns:
+                    tariff_recent = tariff_recent.sort_values("Year", ascending=False)
+
+                tariff_cols = [col for col in ["Date", "Month", "Year", "Component", "Value"] if col in tariff_recent.columns]
+                recent_tariffs = tariff_recent.head(10)[tariff_cols]
+                st.dataframe(recent_tariffs, use_container_width=True, hide_index=True)
+            else:
+                st.info("No tariff data available")
 
 
 st.divider()
