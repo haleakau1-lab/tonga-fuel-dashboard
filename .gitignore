@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Excel lock files
+~$*.xlsx
+~$*.xls
+
+# Sensitive / local only
+app/credentials.json
+
+# Data files too large or local-only (keep Fuel.xlsx tracked — it's the database)
+data/Oil_Data_Consolidated.xlsx
+data/Raw Data Oil Company.xlsx
+data/Transformed_for_Analysis.xlsx
+data/~$*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+*.code-workspace

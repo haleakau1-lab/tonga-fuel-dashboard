@@ -1,0 +1,1 @@
+This folder contains all dashboard data files (Excel, CSV, etc.).
