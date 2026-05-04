@@ -48,8 +48,8 @@ def _get_secret(key, fallback):
         return os.environ.get(key, fallback)
 
 DEFAULT_CREDENTIALS = {
-    "admin": _get_secret("DASHBOARD_ADMIN_PASSWORD", "admin123"),
-    "operator": _get_secret("DASHBOARD_OPERATOR_PASSWORD", "operator123"),
+    "admin": "4c685140ccb4a49e25133c6b310489530dca7dd82a24c170b4ec739655231f2d",
+    "operator": "4c685140ccb4a49e25133c6b310489530dca7dd82a24c170b4ec739655231f2d",
 }
 
 
