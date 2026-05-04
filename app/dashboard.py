@@ -40,10 +40,16 @@ PRICE_FILE = BASE_DIR.parent / "data" / "Transformed_for_Analysis.xlsx"
 # Priority: environment variables > credentials.json > built-in defaults
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 
-# Default credentials — override via env vars DASHBOARD_ADMIN_PASSWORD and DASHBOARD_OPERATOR_PASSWORD
+# Default credentials — override via Streamlit secrets (preferred) or env vars
+def _get_secret(key, fallback):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key, fallback)
+
 DEFAULT_CREDENTIALS = {
-    "admin": os.environ.get("DASHBOARD_ADMIN_PASSWORD", "admin123"),
-    "operator": os.environ.get("DASHBOARD_OPERATOR_PASSWORD", "operator123"),
+    "admin": _get_secret("DASHBOARD_ADMIN_PASSWORD", "admin123"),
+    "operator": _get_secret("DASHBOARD_OPERATOR_PASSWORD", "operator123"),
 }
 
 
