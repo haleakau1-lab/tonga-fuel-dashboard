@@ -1870,9 +1870,8 @@ def build_summary_pdf_bytes():
                         y = page_h - 40
                     pdf.setFont("Helvetica-Bold", 10)
                     pdf.setFillColorRGB(0.18, 0.35, 0.55)
-                    pdf.setTextColor(0.18, 0.35, 0.55)
                     pdf.drawString(margin_l, y - 8, company)
-                    pdf.setTextColor(0, 0, 0)
+                    pdf.setFillColorRGB(0, 0, 0)
                     y -= row_h + 2
 
                     y = draw_imp_header(pdf, y)
