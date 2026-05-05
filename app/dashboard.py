@@ -1821,80 +1821,115 @@ def build_summary_pdf_bytes():
             imp_df["_prev"] = imp_df.groupby(["Company", "Fuel Type", "Location"])["Closing Stock"].shift(1)
             imp_df["_import"] = imp_df["Closing Stock"] - imp_df["_prev"]
             imp_df = imp_df[(imp_df["_import"] > 0) & (imp_df["Date"] <= today)]
-            # Pivot: Date × Fuel Type (sum import volumes)
-            pivot = (
-                imp_df.groupby(["Date", "Fuel Type"])["_import"]
-                .sum()
-                .unstack(fill_value=0)
-                .sort_index()
-            )
-            pivot.columns.name = None
-            fuel_cols = list(pivot.columns)
-            pivot["Total"] = pivot[fuel_cols].sum(axis=1)
 
-            row_h = 13
-            tbl_w = page_w - 48
-            margin_l = 24
-            n_fuel = len(fuel_cols)
-            # Column layout: Date fixed at 105, fuel cols share remaining width minus Total col (90)
-            date_w = 105
-            total_w = 90
-            fuel_w = (tbl_w - date_w - total_w) / max(n_fuel, 1)
-            col_headers = ["Date"] + fuel_cols + ["Total (L)"]
-            col_x = [margin_l]
-            col_x += [margin_l + date_w + i * fuel_w for i in range(n_fuel)]
-            col_x += [margin_l + date_w + n_fuel * fuel_w]
+            if not imp_df.empty:
+                # All fuel types across the full dataset (consistent columns per company)
+                all_fuel_cols = sorted(imp_df["Fuel Type"].unique().tolist())
+                companies = sorted(imp_df["Company"].unique().tolist())
 
-            def draw_pivot_header(pdf, y, col_x, col_headers, tbl_w, row_h):
+                row_h = 13
+                tbl_w = page_w - 48
+                margin_l = 24
+                n_fuel = len(all_fuel_cols)
+                date_w = 105
+                total_w = 90
+                fuel_w = (tbl_w - date_w - total_w) / max(n_fuel, 1)
+                col_headers = ["Date"] + all_fuel_cols + ["Total (L)"]
+                col_x = [margin_l]
+                col_x += [margin_l + date_w + i * fuel_w for i in range(n_fuel)]
+                col_x += [margin_l + date_w + n_fuel * fuel_w]
+
+                def draw_imp_header(pdf, y):
+                    pdf.setFillColorRGB(0.18, 0.35, 0.55)
+                    pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
+                    pdf.setFillColorRGB(1, 1, 1)
+                    pdf.setFont("Helvetica-Bold", 8)
+                    pdf.drawString(col_x[0] + 3, y - 8, col_headers[0])
+                    for i, hdr in enumerate(col_headers[1:], 1):
+                        w = fuel_w if i < len(col_headers) - 1 else total_w
+                        pdf.drawRightString(col_x[i] + w - 3, y - 8, hdr)
+                    pdf.setFillColorRGB(0, 0, 0)
+                    return y - row_h - 2
+
+                grand_total = 0.0
+
+                for company in companies:
+                    co_df = imp_df[imp_df["Company"] == company]
+                    pivot = (
+                        co_df.groupby(["Date", "Fuel Type"])["_import"]
+                        .sum()
+                        .unstack(fill_value=0)
+                        .reindex(columns=all_fuel_cols, fill_value=0)
+                        .sort_index()
+                    )
+                    pivot["Total"] = pivot[all_fuel_cols].sum(axis=1)
+
+                    # Company section header
+                    if y < 80:
+                        pdf.showPage()
+                        y = page_h - 40
+                    pdf.setFont("Helvetica-Bold", 10)
+                    pdf.setFillColorRGB(0.18, 0.35, 0.55)
+                    pdf.setTextColor(0.18, 0.35, 0.55)
+                    pdf.drawString(margin_l, y - 8, company)
+                    pdf.setTextColor(0, 0, 0)
+                    y -= row_h + 2
+
+                    y = draw_imp_header(pdf, y)
+
+                    pdf.setFont("Helvetica", 8)
+                    for row_idx, (date_val, row) in enumerate(pivot.iterrows()):
+                        if y < 50:
+                            pdf.showPage()
+                            y = page_h - 40
+                            y = draw_imp_header(pdf, y)
+                            pdf.setFont("Helvetica", 8)
+                        if row_idx % 2 == 0:
+                            pdf.setFillColorRGB(0.94, 0.97, 1.0)
+                            pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
+                            pdf.setFillColorRGB(0, 0, 0)
+                        date_str = date_val.strftime("%d %b %Y") if pd.notna(date_val) else ""
+                        pdf.drawString(col_x[0] + 3, y - 8, date_str)
+                        for i, fc in enumerate(all_fuel_cols):
+                            val = row[fc]
+                            val_str = f"{val:,.0f}" if val != 0 else "-"
+                            pdf.drawRightString(col_x[1 + i] + fuel_w - 3, y - 8, val_str)
+                        pdf.drawRightString(col_x[-1] + total_w - 3, y - 8, f"{row['Total']:,.0f}")
+                        y -= row_h
+
+                    # Company subtotal row
+                    co_total = pivot["Total"].sum()
+                    grand_total += co_total
+                    y -= 2
+                    pdf.setFillColorRGB(0.30, 0.50, 0.72)
+                    pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
+                    pdf.setFillColorRGB(1, 1, 1)
+                    pdf.setFont("Helvetica-Bold", 8)
+                    pdf.drawString(col_x[0] + 3, y - 8, f"{company} Total:")
+                    for i, fc in enumerate(all_fuel_cols):
+                        fc_total = pivot[fc].sum()
+                        pdf.drawRightString(col_x[1 + i] + fuel_w - 3, y - 8, f"{fc_total:,.0f}")
+                    pdf.drawRightString(col_x[-1] + total_w - 3, y - 8, f"{co_total:,.0f} L")
+                    pdf.setFillColorRGB(0, 0, 0)
+                    y -= row_h + 6
+
+                # Grand total footer
+                if y < 50:
+                    pdf.showPage()
+                    y = page_h - 40
                 pdf.setFillColorRGB(0.18, 0.35, 0.55)
                 pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
                 pdf.setFillColorRGB(1, 1, 1)
                 pdf.setFont("Helvetica-Bold", 8)
-                for i, hdr in enumerate(col_headers):
-                    if i == 0:
-                        pdf.drawString(col_x[i] + 3, y - 8, hdr)
-                    else:
-                        # Right-align numeric columns
-                        pdf.drawRightString(col_x[i] + (fuel_w if i < len(col_headers) - 1 else total_w) - 3, y - 8, hdr)
+                pdf.drawString(col_x[0] + 3, y - 8, "Grand Total:")
+                for i, fc in enumerate(all_fuel_cols):
+                    fc_grand = imp_df[imp_df["Fuel Type"] == fc]["_import"].sum()
+                    pdf.drawRightString(col_x[1 + i] + fuel_w - 3, y - 8, f"{fc_grand:,.0f}")
+                pdf.drawRightString(col_x[-1] + total_w - 3, y - 8, f"{grand_total:,.0f} L")
                 pdf.setFillColorRGB(0, 0, 0)
-                return y - row_h - 2
-
-            y = draw_pivot_header(pdf, y, col_x, col_headers, tbl_w, row_h)
-
-            pdf.setFont("Helvetica", 8)
-            for row_idx, (date_val, row) in enumerate(pivot.iterrows()):
-                if y < 50:
-                    pdf.showPage()
-                    y = page_h - 40
-                    y = draw_pivot_header(pdf, y, col_x, col_headers, tbl_w, row_h)
-                    pdf.setFont("Helvetica", 8)
-                if row_idx % 2 == 0:
-                    pdf.setFillColorRGB(0.94, 0.97, 1.0)
-                    pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
-                    pdf.setFillColorRGB(0, 0, 0)
-                date_str = date_val.strftime("%d %b %Y") if pd.notna(date_val) else ""
-                pdf.drawString(col_x[0] + 3, y - 8, date_str)
-                for i, fc in enumerate(fuel_cols):
-                    val = row[fc]
-                    val_str = f"{val:,.0f}" if val != 0 else "-"
-                    pdf.drawRightString(col_x[1 + i] + fuel_w - 3, y - 8, val_str)
-                total_val = row["Total"]
-                pdf.drawRightString(col_x[-1] + total_w - 3, y - 8, f"{total_val:,.0f}")
-                y -= row_h
-
-            # Grand total footer row
-            y -= 4
-            grand_total_imports = pivot["Total"].sum()
-            pdf.setFillColorRGB(0.18, 0.35, 0.55)
-            pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
-            pdf.setFillColorRGB(1, 1, 1)
-            pdf.setFont("Helvetica-Bold", 8)
-            pdf.drawString(col_x[0] + 3, y - 8, "Total:")
-            for i, fc in enumerate(fuel_cols):
-                col_total = pivot[fc].sum()
-                pdf.drawRightString(col_x[1 + i] + fuel_w - 3, y - 8, f"{col_total:,.0f}")
-            pdf.drawRightString(col_x[-1] + total_w - 3, y - 8, f"{grand_total_imports:,.0f} L")
-            pdf.setFillColorRGB(0, 0, 0)
+            else:
+                pdf.setFont("Helvetica", 9)
+                pdf.drawString(24, y, "No import events detected in the selected date range.")
         else:
             pdf.setFont("Helvetica", 9)
             pdf.drawString(24, y, "No actual stock data available for the selected filters.")
