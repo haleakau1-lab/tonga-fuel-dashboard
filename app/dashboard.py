@@ -1802,20 +1802,21 @@ def build_summary_pdf_bytes():
 
         pdf.showPage()
 
-        # --- Page 2: Deliveries Summary ---
+        # --- Page 2: Delivered Imports (Date <= today) ---
         y = page_h - 30
         pdf.setFont("Helvetica-Bold", 14)
-        pdf.drawString(24, y, "Tonga Fuel Dashboard - Imports Summary")
+        pdf.drawString(24, y, "Tonga Fuel Dashboard - Fuel Imports (Delivered)")
         y -= 18
         pdf.setFont("Helvetica", 9)
         pdf.drawString(24, y, f"Printed: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}")
         y -= 24
 
-        # Imports pivot: rows = Date, columns = Fuel Type, last column = Total
+        # Imports pivot: rows = Date, columns = Fuel Type — delivered entries only
         if not filtered_resupply.empty and "Quantity" in filtered_resupply.columns:
             sup_df = filtered_resupply.copy()
             sup_df["Date"] = pd.to_datetime(sup_df["Date"], errors="coerce")
             sup_df = sup_df.dropna(subset=["Date", "Quantity"])
+            sup_df = sup_df[sup_df["Date"] <= today]
             # Pivot: Date × Fuel Type
             pivot = (
                 sup_df.groupby(["Date", "Fuel Type"])["Quantity"]
@@ -1892,11 +1893,11 @@ def build_summary_pdf_bytes():
             pdf.setFillColorRGB(0, 0, 0)
         else:
             pdf.setFont("Helvetica", 9)
-            pdf.drawString(24, y, "No resupply data available for the selected filters.")
+            pdf.drawString(24, y, "No delivered imports found for the selected filters.")
 
         pdf.showPage()
 
-        # --- Page 3: Scheduled / Upcoming Deliveries ---
+        # --- Page 3: Resupply Schedule (Date > today) ---
         y = page_h - 30
         pdf.setFont("Helvetica-Bold", 14)
         pdf.drawString(24, y, "Tonga Fuel Dashboard - Scheduled Deliveries")
