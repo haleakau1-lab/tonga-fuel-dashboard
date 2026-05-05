@@ -1811,10 +1811,17 @@ def build_summary_pdf_bytes():
         pdf.drawString(24, y, f"Printed: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}")
         y -= 24
 
-        # Imports derived from closing stock increases (day-over-day per company/fuel/location)
-        if not filtered_actual.empty and "Closing Stock" in filtered_actual.columns:
-            imp_df = filtered_actual.copy()
-            imp_df["Date"] = pd.to_datetime(imp_df["Date"], errors="coerce")
+        # Imports derived from closing stock increases — all locations (ignore location filter)
+        _imp_base = actual_df.copy() if not actual_df.empty else filtered_actual.copy()
+        if "Date" in _imp_base.columns:
+            _imp_base["Date"] = pd.to_datetime(_imp_base["Date"], errors="coerce")
+        # Still respect company and fuel type filters from sidebar
+        if company_sel and "Company" in _imp_base.columns:
+            _imp_base = _imp_base[_imp_base["Company"].isin(company_sel)]
+        if fuel_sel and "Fuel Type" in _imp_base.columns:
+            _imp_base = _imp_base[_imp_base["Fuel Type"].isin(fuel_sel)]
+        if not _imp_base.empty and "Closing Stock" in _imp_base.columns:
+            imp_df = _imp_base.copy()
             imp_df = imp_df.dropna(subset=["Date", "Closing Stock"]).sort_values(
                 ["Company", "Fuel Type", "Location", "Date"]
             )
@@ -1931,7 +1938,7 @@ def build_summary_pdf_bytes():
                 pdf.drawString(24, y, "No import events detected in the selected date range.")
         else:
             pdf.setFont("Helvetica", 9)
-            pdf.drawString(24, y, "No actual stock data available for the selected filters.")
+            pdf.drawString(24, y, "No actual stock data available.")
 
         pdf.showPage()
 
