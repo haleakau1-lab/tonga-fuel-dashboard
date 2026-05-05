@@ -1811,15 +1811,19 @@ def build_summary_pdf_bytes():
         pdf.drawString(24, y, f"Printed: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}")
         y -= 24
 
-        # Imports pivot: rows = Date, columns = Fuel Type — delivered entries only
-        if not filtered_resupply.empty and "Quantity" in filtered_resupply.columns:
-            sup_df = filtered_resupply.copy()
-            sup_df["Date"] = pd.to_datetime(sup_df["Date"], errors="coerce")
-            sup_df = sup_df.dropna(subset=["Date", "Quantity"])
-            sup_df = sup_df[sup_df["Date"] <= today]
-            # Pivot: Date × Fuel Type
+        # Imports derived from closing stock increases (day-over-day per company/fuel/location)
+        if not filtered_actual.empty and "Closing Stock" in filtered_actual.columns:
+            imp_df = filtered_actual.copy()
+            imp_df["Date"] = pd.to_datetime(imp_df["Date"], errors="coerce")
+            imp_df = imp_df.dropna(subset=["Date", "Closing Stock"]).sort_values(
+                ["Company", "Fuel Type", "Location", "Date"]
+            )
+            imp_df["_prev"] = imp_df.groupby(["Company", "Fuel Type", "Location"])["Closing Stock"].shift(1)
+            imp_df["_import"] = imp_df["Closing Stock"] - imp_df["_prev"]
+            imp_df = imp_df[(imp_df["_import"] > 0) & (imp_df["Date"] <= today)]
+            # Pivot: Date × Fuel Type (sum import volumes)
             pivot = (
-                sup_df.groupby(["Date", "Fuel Type"])["Quantity"]
+                imp_df.groupby(["Date", "Fuel Type"])["_import"]
                 .sum()
                 .unstack(fill_value=0)
                 .sort_index()
@@ -1893,7 +1897,7 @@ def build_summary_pdf_bytes():
             pdf.setFillColorRGB(0, 0, 0)
         else:
             pdf.setFont("Helvetica", 9)
-            pdf.drawString(24, y, "No delivered imports found for the selected filters.")
+            pdf.drawString(24, y, "No actual stock data available for the selected filters.")
 
         pdf.showPage()
 
