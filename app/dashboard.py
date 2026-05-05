@@ -1982,6 +1982,15 @@ def build_summary_pdf_bytes():
             tpl_data = tpl_data.sort_values("Date")
 
             if not tpl_data.empty:
+                # Aggregate to monthly totals
+                tpl_data["Month"] = tpl_data["Date"].dt.to_period("M")
+                tpl_monthly = (
+                    tpl_data.groupby("Month")["Tonga Power Offtake"]
+                    .sum()
+                    .reset_index()
+                    .sort_values("Month")
+                )
+
                 y -= 14
                 if y < 100:
                     pdf.showPage()
@@ -1989,62 +1998,44 @@ def build_summary_pdf_bytes():
 
                 pdf.setFont("Helvetica-Bold", 11)
                 pdf.setFillColorRGB(0.18, 0.35, 0.55)
-                pdf.drawString(24, y - 8, "Tonga Power Limited (TPL) - Diesel Offtake")
+                pdf.drawString(24, y - 8, "Tonga Power Limited (TPL) - Monthly Diesel Offtake")
                 pdf.setFillColorRGB(0, 0, 0)
                 y -= 20
 
-                # Table: Date | Fuel Type | Offtake (L)
                 tpl_row_h = 13
-                tpl_tbl_w = 400
-                tpl_col_x = [24, 140, 260]
-                tpl_headers = ["Date", "Fuel Type", "Offtake (L)"]
+                tpl_tbl_w = 300
+                tpl_col_x = [24, 160]
+                tpl_headers = ["Month", "Offtake (L)"]
 
                 pdf.setFillColorRGB(0.18, 0.35, 0.55)
                 pdf.rect(24, y - tpl_row_h + 3, tpl_tbl_w, tpl_row_h, fill=1, stroke=0)
                 pdf.setFillColorRGB(1, 1, 1)
                 pdf.setFont("Helvetica-Bold", 8)
                 pdf.drawString(tpl_col_x[0] + 3, y - 8, tpl_headers[0])
-                pdf.drawString(tpl_col_x[1] + 3, y - 8, tpl_headers[1])
-                pdf.drawRightString(tpl_col_x[2] + 140, y - 8, tpl_headers[2])
+                pdf.drawRightString(tpl_col_x[1] + 140, y - 8, tpl_headers[1])
                 pdf.setFillColorRGB(0, 0, 0)
                 y -= tpl_row_h + 2
 
                 pdf.setFont("Helvetica", 8)
-                for row_idx, (_, row) in enumerate(tpl_data.iterrows()):
-                    if y < 50:
-                        pdf.showPage()
-                        y = page_h - 40
-                        pdf.setFillColorRGB(0.18, 0.35, 0.55)
-                        pdf.rect(24, y - tpl_row_h + 3, tpl_tbl_w, tpl_row_h, fill=1, stroke=0)
-                        pdf.setFillColorRGB(1, 1, 1)
-                        pdf.setFont("Helvetica-Bold", 8)
-                        pdf.drawString(tpl_col_x[0] + 3, y - 8, tpl_headers[0])
-                        pdf.drawString(tpl_col_x[1] + 3, y - 8, tpl_headers[1])
-                        pdf.drawRightString(tpl_col_x[2] + 140, y - 8, tpl_headers[2])
-                        pdf.setFillColorRGB(0, 0, 0)
-                        y -= tpl_row_h + 2
-                        pdf.setFont("Helvetica", 8)
+                for row_idx, (_, row) in enumerate(tpl_monthly.iterrows()):
                     if row_idx % 2 == 0:
                         pdf.setFillColorRGB(0.94, 0.97, 1.0)
                         pdf.rect(24, y - tpl_row_h + 3, tpl_tbl_w, tpl_row_h, fill=1, stroke=0)
                         pdf.setFillColorRGB(0, 0, 0)
-                    date_str = row["Date"].strftime("%d %b %Y") if pd.notna(row.get("Date")) else ""
-                    fuel_str = str(row.get("Fuel Type", ""))
+                    month_str = row["Month"].strftime("%B %Y")
                     qty_str = f"{float(row['Tonga Power Offtake']):,.0f}"
-                    pdf.drawString(tpl_col_x[0] + 3, y - 8, date_str)
-                    pdf.drawString(tpl_col_x[1] + 3, y - 8, fuel_str)
-                    pdf.drawRightString(tpl_col_x[2] + 140, y - 8, qty_str)
+                    pdf.drawString(tpl_col_x[0] + 3, y - 8, month_str)
+                    pdf.drawRightString(tpl_col_x[1] + 140, y - 8, qty_str)
                     y -= tpl_row_h
 
-                # TPL total footer
-                tpl_total = tpl_data["Tonga Power Offtake"].sum()
+                tpl_total = tpl_monthly["Tonga Power Offtake"].sum()
                 y -= 2
                 pdf.setFillColorRGB(0.30, 0.50, 0.72)
                 pdf.rect(24, y - tpl_row_h + 3, tpl_tbl_w, tpl_row_h, fill=1, stroke=0)
                 pdf.setFillColorRGB(1, 1, 1)
                 pdf.setFont("Helvetica-Bold", 8)
                 pdf.drawString(tpl_col_x[0] + 3, y - 8, "Total TPL Offtake:")
-                pdf.drawRightString(tpl_col_x[2] + 140, y - 8, f"{tpl_total:,.0f} L")
+                pdf.drawRightString(tpl_col_x[1] + 140, y - 8, f"{tpl_total:,.0f} L")
                 pdf.setFillColorRGB(0, 0, 0)
 
         pdf.showPage()
