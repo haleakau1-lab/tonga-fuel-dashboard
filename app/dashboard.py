@@ -1811,62 +1811,84 @@ def build_summary_pdf_bytes():
         pdf.drawString(24, y, f"Printed: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}")
         y -= 24
 
-        # Fuel supply (resupply) entries — all dates, sorted by date
+        # Imports pivot: rows = Date, columns = Fuel Type, last column = Total
         if not filtered_resupply.empty and "Quantity" in filtered_resupply.columns:
             sup_df = filtered_resupply.copy()
             sup_df["Date"] = pd.to_datetime(sup_df["Date"], errors="coerce")
-            sup_df = sup_df.dropna(subset=["Date", "Quantity"]).sort_values("Date")
+            sup_df = sup_df.dropna(subset=["Date", "Quantity"])
+            # Pivot: Date × Fuel Type
+            pivot = (
+                sup_df.groupby(["Date", "Fuel Type"])["Quantity"]
+                .sum()
+                .unstack(fill_value=0)
+                .sort_index()
+            )
+            pivot.columns.name = None
+            fuel_cols = list(pivot.columns)
+            pivot["Total"] = pivot[fuel_cols].sum(axis=1)
 
             row_h = 13
-            col_x = [24, 120, 280, 430, 580]
-            col_headers = ["Date", "Company", "Fuel Type", "Location", "Quantity (L)"]
+            tbl_w = page_w - 48
+            margin_l = 24
+            n_fuel = len(fuel_cols)
+            # Column layout: Date fixed at 105, fuel cols share remaining width minus Total col (90)
+            date_w = 105
+            total_w = 90
+            fuel_w = (tbl_w - date_w - total_w) / max(n_fuel, 1)
+            col_headers = ["Date"] + fuel_cols + ["Total (L)"]
+            col_x = [margin_l]
+            col_x += [margin_l + date_w + i * fuel_w for i in range(n_fuel)]
+            col_x += [margin_l + date_w + n_fuel * fuel_w]
 
-            # Table header
-            pdf.setFillColorRGB(0.18, 0.35, 0.55)
-            pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
-            pdf.setFillColorRGB(1, 1, 1)
-            pdf.setFont("Helvetica-Bold", 9)
-            for i, hdr in enumerate(col_headers):
-                pdf.drawString(col_x[i] + 3, y - 8, hdr)
-            pdf.setFillColorRGB(0, 0, 0)
-            y -= row_h + 2
+            def draw_pivot_header(pdf, y, col_x, col_headers, tbl_w, row_h):
+                pdf.setFillColorRGB(0.18, 0.35, 0.55)
+                pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
+                pdf.setFillColorRGB(1, 1, 1)
+                pdf.setFont("Helvetica-Bold", 8)
+                for i, hdr in enumerate(col_headers):
+                    if i == 0:
+                        pdf.drawString(col_x[i] + 3, y - 8, hdr)
+                    else:
+                        # Right-align numeric columns
+                        pdf.drawRightString(col_x[i] + (fuel_w if i < len(col_headers) - 1 else total_w) - 3, y - 8, hdr)
+                pdf.setFillColorRGB(0, 0, 0)
+                return y - row_h - 2
 
-            pdf.setFont("Helvetica", 9)
-            for row_idx, (_, row) in enumerate(sup_df.iterrows()):
+            y = draw_pivot_header(pdf, y, col_x, col_headers, tbl_w, row_h)
+
+            pdf.setFont("Helvetica", 8)
+            for row_idx, (date_val, row) in enumerate(pivot.iterrows()):
                 if y < 50:
                     pdf.showPage()
                     y = page_h - 40
-                    # Repeat header on new page
-                    pdf.setFillColorRGB(0.18, 0.35, 0.55)
-                    pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
-                    pdf.setFillColorRGB(1, 1, 1)
-                    pdf.setFont("Helvetica-Bold", 9)
-                    for i, hdr in enumerate(col_headers):
-                        pdf.drawString(col_x[i] + 3, y - 8, hdr)
-                    pdf.setFillColorRGB(0, 0, 0)
-                    y -= row_h + 2
-                    pdf.setFont("Helvetica", 9)
+                    y = draw_pivot_header(pdf, y, col_x, col_headers, tbl_w, row_h)
+                    pdf.setFont("Helvetica", 8)
                 if row_idx % 2 == 0:
                     pdf.setFillColorRGB(0.94, 0.97, 1.0)
-                    pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
+                    pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
                     pdf.setFillColorRGB(0, 0, 0)
-                date_str = row["Date"].strftime("%d %b %Y") if pd.notna(row.get("Date")) else ""
-                qty_str = f"{float(row['Quantity']):,.0f}" if pd.notna(row.get("Quantity")) else ""
-                vals = [date_str, str(row.get("Company","")), str(row.get("Fuel Type","")),
-                        str(row.get("Location","")), qty_str]
-                for i, val in enumerate(vals):
-                    pdf.drawString(col_x[i] + 3, y - 8, val)
+                date_str = date_val.strftime("%d %b %Y") if pd.notna(date_val) else ""
+                pdf.drawString(col_x[0] + 3, y - 8, date_str)
+                for i, fc in enumerate(fuel_cols):
+                    val = row[fc]
+                    val_str = f"{val:,.0f}" if val != 0 else "-"
+                    pdf.drawRightString(col_x[1 + i] + fuel_w - 3, y - 8, val_str)
+                total_val = row["Total"]
+                pdf.drawRightString(col_x[-1] + total_w - 3, y - 8, f"{total_val:,.0f}")
                 y -= row_h
 
-            # Grand total footer
+            # Grand total footer row
             y -= 4
-            grand_total_imports = sup_df["Quantity"].sum()
+            grand_total_imports = pivot["Total"].sum()
             pdf.setFillColorRGB(0.18, 0.35, 0.55)
-            pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
+            pdf.rect(margin_l, y - row_h + 3, tbl_w, row_h, fill=1, stroke=0)
             pdf.setFillColorRGB(1, 1, 1)
-            pdf.setFont("Helvetica-Bold", 9)
-            pdf.drawString(col_x[0] + 3, y - 8, "Total Fuel Supplied:")
-            pdf.drawString(col_x[4] + 3, y - 8, f"{grand_total_imports:,.0f} L")
+            pdf.setFont("Helvetica-Bold", 8)
+            pdf.drawString(col_x[0] + 3, y - 8, "Total:")
+            for i, fc in enumerate(fuel_cols):
+                col_total = pivot[fc].sum()
+                pdf.drawRightString(col_x[1 + i] + fuel_w - 3, y - 8, f"{col_total:,.0f}")
+            pdf.drawRightString(col_x[-1] + total_w - 3, y - 8, f"{grand_total_imports:,.0f} L")
             pdf.setFillColorRGB(0, 0, 0)
         else:
             pdf.setFont("Helvetica", 9)
