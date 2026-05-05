@@ -1769,13 +1769,14 @@ def build_summary_pdf_bytes():
 
         y -= 8
         pdf.setFont("Helvetica-Bold", 10)
-        pdf.drawString(24, y, "Latest Fuel Prices (Retail/Wholesale)")
+        pdf.drawString(24, y, "Latest Retail Fuel Prices (T$/L)")
         y -= 12
         pdf.setFont("Helvetica", 9)
-        if not latest_prices.empty:
-            for row in latest_prices.itertuples(index=False):
-                pdf.drawString(28, y, f"{row.Price_Type} - {row.Fuel}")
-                pdf.drawRightString(260, y, f"{float(row.Price):.2f}")
+        retail_prices = latest_prices[latest_prices["Price_Type"] == "Retail"] if not latest_prices.empty else latest_prices
+        if not retail_prices.empty:
+            for row in retail_prices.itertuples(index=False):
+                pdf.drawString(28, y, f"{row.Fuel}")
+                pdf.drawRightString(260, y, f"T${float(row.Price):.2f}/L")
                 y -= 11
                 if y < 110:
                     break
@@ -1810,97 +1811,66 @@ def build_summary_pdf_bytes():
         pdf.drawString(24, y, f"Printed: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}")
         y -= 24
 
-        # Estimate imports: day-over-day closing stock increases per company/fuel/location
-        if not filtered_actual.empty and "Closing Stock" in filtered_actual.columns:
-            imp_df = filtered_actual.copy()
-            imp_df["Date"] = pd.to_datetime(imp_df["Date"], errors="coerce")
-            imp_df = imp_df.sort_values(["Company", "Fuel Type", "Location", "Date"])
-            imp_df["prev_stock"] = imp_df.groupby(["Company", "Fuel Type", "Location"])["Closing Stock"].shift(1)
-            imp_df["import_qty"] = imp_df["Closing Stock"] - imp_df["prev_stock"]
-            imports = imp_df[imp_df["import_qty"] > 0].dropna(subset=["import_qty"])
+        # Fuel supply (resupply) entries — all dates, sorted by date
+        if not filtered_resupply.empty and "Quantity" in filtered_resupply.columns:
+            sup_df = filtered_resupply.copy()
+            sup_df["Date"] = pd.to_datetime(sup_df["Date"], errors="coerce")
+            sup_df = sup_df.dropna(subset=["Date", "Quantity"]).sort_values("Date")
 
-            pdf.setFont("Helvetica", 8)
-            pdf.drawString(24, y, "Estimated from closing stock increases (day-over-day) per company/fuel/location")
-            y -= 16
+            row_h = 13
+            col_x = [24, 120, 280, 430, 580]
+            col_headers = ["Date", "Company", "Fuel Type", "Location", "Quantity (L)"]
 
-            if not imports.empty and "Company" in imports.columns:
-                row_h = 13
+            # Table header
+            pdf.setFillColorRGB(0.18, 0.35, 0.55)
+            pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
+            pdf.setFillColorRGB(1, 1, 1)
+            pdf.setFont("Helvetica-Bold", 9)
+            for i, hdr in enumerate(col_headers):
+                pdf.drawString(col_x[i] + 3, y - 8, hdr)
+            pdf.setFillColorRGB(0, 0, 0)
+            y -= row_h + 2
 
-                # --- Table 1: By Fuel Type ---
-                pdf.setFont("Helvetica-Bold", 10)
-                pdf.drawString(24, y, "Estimated Imports by Fuel Type")
-                y -= 13
-
-                col_x1 = [24, 300]
-                pdf.setFillColorRGB(0.18, 0.35, 0.55)
-                pdf.rect(24, y - row_h + 3, 320, row_h, fill=1, stroke=0)
-                pdf.setFillColorRGB(1, 1, 1)
-                pdf.setFont("Helvetica-Bold", 9)
-                pdf.drawString(col_x1[0] + 3, y - 8, "Fuel Type")
-                pdf.drawRightString(col_x1[1] + 60, y - 8, "Total Imported (L)")
-                pdf.setFillColorRGB(0, 0, 0)
-                y -= row_h + 1
-
-                by_fuel = imports.groupby("Fuel Type")["import_qty"].sum().sort_values(ascending=False)
-                for i, (fuel_name, qty) in enumerate(by_fuel.items()):
-                    if i % 2 == 0:
-                        pdf.setFillColorRGB(0.94, 0.97, 1.0)
-                        pdf.rect(24, y - row_h + 3, 320, row_h, fill=1, stroke=0)
-                        pdf.setFillColorRGB(0, 0, 0)
+            pdf.setFont("Helvetica", 9)
+            for row_idx, (_, row) in enumerate(sup_df.iterrows()):
+                if y < 50:
+                    pdf.showPage()
+                    y = page_h - 40
+                    # Repeat header on new page
+                    pdf.setFillColorRGB(0.18, 0.35, 0.55)
+                    pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
+                    pdf.setFillColorRGB(1, 1, 1)
+                    pdf.setFont("Helvetica-Bold", 9)
+                    for i, hdr in enumerate(col_headers):
+                        pdf.drawString(col_x[i] + 3, y - 8, hdr)
+                    pdf.setFillColorRGB(0, 0, 0)
+                    y -= row_h + 2
                     pdf.setFont("Helvetica", 9)
-                    pdf.drawString(col_x1[0] + 3, y - 8, str(fuel_name))
-                    pdf.drawRightString(col_x1[1] + 60, y - 8, f"{qty:,.0f}")
-                    y -= row_h
+                if row_idx % 2 == 0:
+                    pdf.setFillColorRGB(0.94, 0.97, 1.0)
+                    pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
+                    pdf.setFillColorRGB(0, 0, 0)
+                date_str = row["Date"].strftime("%d %b %Y") if pd.notna(row.get("Date")) else ""
+                qty_str = f"{float(row['Quantity']):,.0f}" if pd.notna(row.get("Quantity")) else ""
+                vals = [date_str, str(row.get("Company","")), str(row.get("Fuel Type","")),
+                        str(row.get("Location","")), qty_str]
+                for i, val in enumerate(vals):
+                    pdf.drawString(col_x[i] + 3, y - 8, val)
+                y -= row_h
 
-                y -= 16
-
-                # --- Table 2: By Company ---
-                pdf.setFont("Helvetica-Bold", 10)
-                pdf.drawString(24, y, "Estimated Imports by Company")
-                y -= 13
-
-                col_x2 = [24, 300]
-                pdf.setFillColorRGB(0.18, 0.35, 0.55)
-                pdf.rect(24, y - row_h + 3, 320, row_h, fill=1, stroke=0)
-                pdf.setFillColorRGB(1, 1, 1)
-                pdf.setFont("Helvetica-Bold", 9)
-                pdf.drawString(col_x2[0] + 3, y - 8, "Company")
-                pdf.drawRightString(col_x2[1] + 60, y - 8, "Total Imported (L)")
-                pdf.setFillColorRGB(0, 0, 0)
-                y -= row_h + 1
-
-                by_company = imports.groupby("Company")["import_qty"].sum().sort_values(ascending=False)
-                for i, (company_name, qty) in enumerate(by_company.items()):
-                    if i % 2 == 0:
-                        pdf.setFillColorRGB(0.94, 0.97, 1.0)
-                        pdf.rect(24, y - row_h + 3, 320, row_h, fill=1, stroke=0)
-                        pdf.setFillColorRGB(0, 0, 0)
-                    pdf.setFont("Helvetica", 9)
-                    pdf.drawString(col_x2[0] + 3, y - 8, str(company_name))
-                    pdf.drawRightString(col_x2[1] + 60, y - 8, f"{qty:,.0f}")
-                    y -= row_h
-
-                grand_total_imports = imports["import_qty"].sum()
-            else:
-                grand_total_imports = 0.0
-                pdf.setFont("Helvetica", 9)
-                pdf.drawString(24, y, "No data")
-                y -= 12
-
+            # Grand total footer
             y -= 4
-            # Divider line
-            pdf.setStrokeColorRGB(0.18, 0.35, 0.55)
-            pdf.setLineWidth(1)
-            pdf.line(24, y, 350, y)
-            y -= 12
-
-            # --- Grand Total ---
-            pdf.setFont("Helvetica-Bold", 11)
-            pdf.drawString(24, y, "Grand Total Imported:")
-            pdf.drawRightString(350, y, f"{grand_total_imports:,.0f} L")
+            grand_total_imports = sup_df["Quantity"].sum()
+            pdf.setFillColorRGB(0.18, 0.35, 0.55)
+            pdf.rect(24, y - row_h + 3, page_w - 48, row_h, fill=1, stroke=0)
+            pdf.setFillColorRGB(1, 1, 1)
+            pdf.setFont("Helvetica-Bold", 9)
+            pdf.drawString(col_x[0] + 3, y - 8, "Total Fuel Supplied:")
+            pdf.drawString(col_x[4] + 3, y - 8, f"{grand_total_imports:,.0f} L")
+            pdf.setFillColorRGB(0, 0, 0)
         else:
             pdf.setFont("Helvetica", 9)
-            pdf.drawString(24, y, "No actual data available for the selected filters.")
+            pdf.drawString(24, y, "No resupply data available for the selected filters.")
 
         pdf.showPage()
 
